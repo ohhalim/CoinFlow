@@ -1,8 +1,7 @@
 name: CD Pipeline
 
 on:
-  push:
-    branches: [ main ]   # main 머지 시 자동 배포
+  workflow_dispatch:     # 수동 실행만 허용 (EC2 준비 후 push 트리거로 변경)
 
 jobs:
   deploy:
