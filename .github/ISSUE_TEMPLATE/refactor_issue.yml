@@ -1,0 +1,36 @@
+name: 리팩토링 (Refactor)
+description: 코드 및 성능 개선
+title: "[Refactor]: "
+labels: ["refactor"]
+body:
+  - type: input
+    id: branch_keyword
+    attributes:
+      label: "Branch Keyword"
+      description: "영문 소문자로 간결한 브랜치 명을 입력하세요 (예: matching-lock, ledger-replay)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: refactor_target
+    attributes:
+      label: "리팩토링 대상"
+      description: "어떤 부분을 리팩토링할지 간략하게 설명해주세요"
+    validations:
+      required: true
+
+  - type: textarea
+    id: issue_analysis
+    attributes:
+      label: "문제점"
+      description: "기존 코드의 문제점 분석을 입력해주세요"
+    validations:
+      required: false
+
+  - type: textarea
+    id: improvement_plan
+    attributes:
+      label: "개선 방안"
+      description: "제안하는 리팩토링 전략을 입력해주세요"
+    validations:
+      required: false

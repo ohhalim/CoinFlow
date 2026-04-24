@@ -1,0 +1,39 @@
+name: 기능 구현 (Feat)
+description: 기능 구현 작업을 위한 템플릿
+title: "[Feat]: "
+labels: ["feat"]
+body:
+  - type: input
+    id: branch_keyword
+    attributes:
+      label: "Branch Keyword"
+      description: "영문 소문자로 간결한 브랜치 명을 입력하세요 (예: wallet-deposit, order-cancel)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: implementation
+    attributes:
+      label: "구현할 기능"
+      description: "어떤 기능을 구현할지 간략하게 설명해주세요"
+    validations:
+      required: true
+
+  - type: textarea
+    id: api_spec
+    attributes:
+      label: "API 명세"
+      description: "구현할 API의 정보를 명시해주세요"
+      value: |
+        ### 엔드포인트
+        - [HTTP 메서드] /api/[경로]
+
+  - type: textarea
+    id: test_plan
+    attributes:
+      label: "테스트 계획"
+      description: "기능 검증을 위한 테스트 계획을 작성해주세요"
+      value: |
+        - [ ] 단위 테스트
+        - [ ] 통합 테스트
+        - [ ] 정합성 검증 (ledger replay)

@@ -1,0 +1,44 @@
+name: 긴급 수정 (Hotfix)
+description: 운영 중 긴급한 버그 수정을 위한 템플릿
+title: "[Hotfix]: "
+labels: ["hotfix"]
+body:
+  - type: input
+    id: branch_keyword
+    attributes:
+      label: "Branch Keyword"
+      description: "긴급 수정 내용을 간결한 브랜치명으로 입력하세요 (예: wallet-negative, duplicate-fill)"
+      placeholder: "예: wallet-negative"
+    validations:
+      required: true
+
+  - type: textarea
+    id: issue_description
+    attributes:
+      label: "문제 설명"
+      description: "발생한 문제를 구체적으로 작성해주세요"
+      placeholder: |
+        - 현상:
+        - 영향 범위:
+        - 발생 조건:
+
+  - type: textarea
+    id: fix_summary
+    attributes:
+      label: "수정 내용"
+      description: "해결 방안 및 수정된 코드를 간단히 요약해주세요"
+      placeholder: |
+        - 원인:
+        - 수정 사항:
+        - 추가 조치:
+
+  - type: textarea
+    id: verification_plan
+    attributes:
+      label: "검증 및 테스트 계획"
+      description: "수정된 부분을 어떻게 검증할지 명시해주세요"
+      value: |
+        - [ ] 로컬 환경 테스트
+        - [ ] 정합성 검증 (ledger replay mismatch 0 확인)
+        - [ ] 동시성 시나리오 재현 테스트
+        - [ ] develop 브랜치 역병합(Back-merge) 예정

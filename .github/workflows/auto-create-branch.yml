@@ -1,0 +1,106 @@
+name: auto-create-branch
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  assign-author:
+    name: 작성자 자동 할당
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assign author to issue
+        uses: technote-space/assign-author@v1
+
+  create-branch-and-pr:
+    name: 자동 브랜치 생성
+    runs-on: ubuntu-latest
+    needs: assign-author
+
+    steps:
+      - name: Decide type / keyword / routes
+        id: decide
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const body = issue.body || '';
+            const labels = (issue.labels || []).map(l => l.name.toLowerCase());
+
+            // 1) type 결정 (우선순위: hotfix > release > refactor > fix > chore > feat)
+            let type = 'feat';
+            if (labels.includes('hotfix')) type = 'hotfix';
+            else if (labels.includes('release')) type = 'release';
+            else if (labels.includes('refactor')) type = 'refactor';
+            else if (labels.includes('fix')) type = 'fix';
+            else if (labels.includes('chore')) type = 'chore';
+
+            // 2) 이슈 폼에서 Branch Keyword 추출 (### Branch Keyword 다음 줄)
+            const m = body.match(/###\s*Branch Keyword\s*\n([^\n]+)/i);
+            if (!m) {
+              core.setFailed('브랜치 키워드(### Branch Keyword)가 이슈 본문에 없습니다.');
+              return;
+            }
+            const rawKeyword = m[1].trim();
+
+            // 3) 키워드 정제
+            const keyword = rawKeyword
+              .toLowerCase()
+              .replace(/[^a-z0-9-]/g, '-')
+              .replace(/-+/g, '-')
+              .replace(/^-|-$/g, '')
+              .slice(0, 30);
+
+            if (!keyword) {
+              core.setFailed('정제된 브랜치 키워드가 비어 있습니다.');
+              return;
+            }
+
+            // 4) 브랜치 라우팅 규칙
+            //   - hotfix: from main -> PR to main
+            //   - release: from develop -> PR to main
+            //   - 그 외: from develop -> PR to develop
+            let from_branch = 'develop';
+            let pr_base = 'develop';
+
+            if (type === 'hotfix') {
+              from_branch = 'main'; pr_base = 'main';
+            } else if (type === 'release') {
+              from_branch = 'develop'; pr_base = 'main';
+            }
+
+            // 5) 브랜치 이름 (이슈 번호 포함)
+            const branch = `${type}/${issue.number}/${keyword}`;
+
+            core.setOutput('type', type);
+            core.setOutput('keyword', keyword);
+            core.setOutput('from_branch', from_branch);
+            core.setOutput('pr_base', pr_base);
+            core.setOutput('branch', branch);
+
+      - name: Create branch from decided base
+        id: create_branch
+        uses: peterjgrainger/action-create-branch@v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GIT_TOKEN }}
+        with:
+          branch: ${{ steps.decide.outputs.branch }}
+          from_branch: ${{ steps.decide.outputs.from_branch }}
+
+      - name: Comment on issue with results
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue_number = context.payload.issue.number;
+            const branch = '${{ steps.decide.outputs.branch }}';
+            let body = `브랜치 \`${branch}\` 가 생성되었습니다.`;
+            await github.rest.issues.createComment({
+              ...context.repo,
+              issue_number,
+              body
+            });

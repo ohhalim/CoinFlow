@@ -1,0 +1,34 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.iws
+*.ipr
+.cursor/
+
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Spring Boot
+*.log
+logs/
+
+# 환경 변수 (절대 커밋 금지)
+.env
+.env.*
+application-local.properties
+application-local.yml
+application-prod.yml
+application-dev.yml
+secrets.*
+credentials.*
+
+# Testcontainers
+.testcontainers.properties

@@ -1,0 +1,46 @@
+name: 릴리즈 배포 (Release)
+description: develop 브랜치에서 main 브랜치로 배포하기 위한 템플릿
+title: "[Release]: "
+labels: ["release"]
+body:
+  - type: input
+    id: branch_keyword
+    attributes:
+      label: "Branch Keyword"
+      description: "릴리즈 버전을 영문 소문자로 입력하세요 (예: v1-0-0)"
+      placeholder: "예: v1-0-0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: release_summary
+    attributes:
+      label: "릴리즈 개요"
+      description: "이번 릴리즈의 주요 변경 사항을 요약해주세요"
+      placeholder: |
+        - 신규 기능:
+        - 버그 수정:
+        - 리팩터링:
+        - 기타:
+    validations:
+      required: true
+
+  - type: textarea
+    id: qa_result
+    attributes:
+      label: "검증 결과"
+      description: "릴리즈 전 검증 결과를 작성해주세요"
+      value: |
+        - [ ] 정합성 테스트 통과 (잔고 음수 0, duplicate fill 0)
+        - [ ] idempotency 재시도 테스트 통과
+        - [ ] ledger replay mismatch 0
+        - [ ] k6 부하 테스트 오류율 < 1%
+
+  - type: textarea
+    id: deploy_plan
+    attributes:
+      label: "배포 계획"
+      description: "배포 일자, 대상 환경 등을 명시해주세요"
+      value: |
+        - 예정 배포일: YYYY-MM-DD
+        - 배포 대상 환경: production
