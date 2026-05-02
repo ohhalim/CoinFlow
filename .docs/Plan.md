@@ -1,143 +1,200 @@
-# CoinFlow - 프로젝트 기안서 v2
-## 단일 서버 기반 고정합성 주문 매칭 및 자산 원장 시스템
-### 부제: BTC/KRW 단일 마켓 암호화폐 거래소 코어
+# CoinFlow MVP 구현 계획
+
+이 문서는 CoinFlow MVP의 구현 순서와 책임 경계를 정리한다.
+
+최신 기준 문서는 아래 순서를 따른다.
+
+1. [PRD.md](./PRD.md)
+2. [ERD.md](./ERD.md)
+3. [API.md](./API.md)
+4. [TestPlan.md](./TestPlan.md)
+5. [Reference.md](./Reference.md)
+6. [ERDCloud.sql](./ERDCloud.sql)
+
+`Plan.md`는 위 문서를 구현 순서로 풀어낸 실행 계획이다.
 
 ---
 
 ## 1. 한 줄 정의
 
-> 단일 서버 환경에서 BTC/KRW 단일 마켓의 주문 접수, 자산 잠금, 가격·시간 우선 매칭, 부분 체결,
-> append-only ledger, 정합성 검증까지 직접 구현하고 수치로 증명하는 백엔드 프로젝트
+> 단일 인스턴스 환경에서 회원가입/로그인, 지정가 주문 생성/취소, 가격-시간 우선 매칭, 체결, 정산, append-only 원장, 조회까지 검증하는 거래소 코어 백엔드 MVP
 
 ---
 
-## 2. 프로젝트 목표
+## 2. MVP 목표
 
 | 증명 항목 | 구현 방법 |
 |---|---|
-| 거래 핵심 로직 직접 설계 | 외부 PG/API 의존 없음 |
-| 자산 잠금 모델 | `available / locked` 분리 |
-| 매칭 우선순위 보장 | 가격 우선 / 시간 우선 / 부분 체결 |
-| 중복 처리 방지 | DB 기반 idempotency |
-| 자산 이동 추적 | append-only ledger |
-| 정합성 재검증 | ledger replay reconciliation |
-| 성능 측정 및 개선 | k6 + Prometheus + Grafana |
+| 사용자별 데이터 분리 | JWT access token에서 현재 사용자 ID 추출 |
+| 자산 잠금 모델 | `wallets.available_balance / locked_balance` 분리 |
+| 가격-시간 우선 매칭 | 가격 우선 + `orders.sequence` 시간 우선 |
+| 주문 상태 전이 | `OPEN`, `PARTIALLY_FILLED`, `FILLED`, `CANCELED` |
+| 체결 기록 | `trades` 저장 |
+| 자산 이동 추적 | `wallet_ledgers` append-only 기록 |
+| 이벤트 추적 | `domain_events` 내부 이벤트 로그 |
+| 조회 모델 | 메모리 오더북 + DB 조회 API |
+| 정합성 검증 | `TestPlan.md` 기반 통합 테스트 |
 
 ---
 
-## 3. 범위
+## 3. MVP 범위
 
 ### 포함
-- BTC/KRW 단일 마켓
-- 지정가 매수 / 지정가 매도
-- 주문 생성 / 취소 / 체결
-- 부분 체결
-- wallet / ledger 기반 자산 관리
-- 체결 내역 조회
-- 기본 orderbook 조회
-- ledger replay 정합성 검증
-- k6 부하 테스트 및 수치 확보
 
-### 제외 (MVP)
-- 실제 블록체인 입출금
+- 회원가입
+- 로그인
+- JWT access token 발급/검증
+- 현재 사용자 조회
+- 자산/시장 seed data
+- 지갑 seed balance
+- 지갑 조회
+- 원장 조회
+- 지정가 매수/매도 주문 생성
+- 주문 취소
+- 가격-시간 우선 매칭
+- 부분 체결 / 완전 체결
+- 체결 정산
+- 체결 조회
+- 사용자 fill 조회
+- 메모리 오더북 조회
+- 서버 시작 시 미체결 주문 기반 오더북 초기화
+- 내부 이벤트 로그 기록
+
+### 제외
+
+- 입금/출금 API
 - 시장가 주문
-- 다중 마켓
-- 자동매매 봇
-- 분산 매칭 엔진
-- Kafka / WebSocket
-- 복잡한 인증/권한 모델
-
-### Phase 4 확장
-- `outbox -> Kafka -> WebSocket` 실시간 호가창/체결 broadcast
+- IOC/FOK/GTT
+- post-only 주문
+- iceberg 주문
+- 수수료
+- dust 처리
+- refresh token
+- 이메일 인증
+- 비밀번호 재설정
+- OAuth/social login
+- role/permission 기반 권한 관리
+- Kafka / Redis / MQ
+- WebSocket
+- 서버 분리
+- replay / redrive / recovery
+- 관리자 페이지
 
 ---
 
 ## 4. 핵심 설계 원칙
 
-### 4.1 DB가 진실이다 (MySQL = Source of Truth)
+### 4.1 DB가 Source of Truth
 
-MVP에서는 MySQL이 유일한 source of truth다.
+MVP에서 DB가 정합성의 기준이다.
 
 | 테이블 | 역할 |
 |---|---|
-| `wallets` | 현재 상태 스냅샷 |
-| `ledger_entries` | 모든 자산 이동 이력 (append-only) |
-| `orders` | 주문 이력 |
-| `trades` | 체결 이력 |
-| `idempotency_requests` | 중복 요청 방지 및 결과 재반환 |
+| `users` | 회원가입/로그인 사용자 |
+| `assets` | 자산 정보 |
+| `markets` | 시장과 주문 검증 정책 |
+| `wallets` | 사용자별 자산 현재 스냅샷 |
+| `wallet_ledgers` | 모든 지갑 변동 이력 |
+| `order_sequences` | 시장별 주문 sequence |
+| `orders` | 주문 상태와 수량 |
+| `trades` | 체결 기록 |
+| `domain_events` | 내부 이벤트 로그 |
+| `idempotency_requests` | API 멱등성 확장용 예약 테이블 |
 
-Redis는 MVP에서 제외. 금융성 정합성이 먼저다.
+### 4.2 메모리 오더북은 파생 조회 모델
 
-### 4.2 단일 마켓 = 단일 Coordinator
+메모리 오더북은 매칭 후보 조회와 호가 조회를 위한 파생 상태다.
 
-BTC/KRW는 한 개 마켓이므로 주문 생성/취소/매칭으로 이어지는 상태 변경 구간은
-같은 `MarketCoordinator`를 통과시킨다.
+- DB가 source of truth다.
+- 트랜잭션 commit 이후에만 메모리 오더북을 변경한다.
+- 서버 시작 시 `OPEN`, `PARTIALLY_FILLED` 주문을 DB에서 읽어 초기화한다.
 
-- 구현: 단일 JVM의 `ReentrantLock` 또는 single-thread executor
-- 이유: 단일 서버 MVP에서 가장 단순하게 price-time priority와 cancel/fill race를 보장
+### 4.3 동일 시장 명령은 순차 처리
 
-### 4.3 시간 우선은 sequence로 보장
+같은 market의 주문 생성/취소/매칭은 순차 처리한다.
 
-동일 가격 내 우선순위는 `created_at`이 아니라 단조 증가하는 `priority_seq`로 보장한다.
+MVP 구현 선택지:
 
-- 동일 가격일 때 `priority_seq ASC`
-- 이 디테일 하나로 프로젝트가 훨씬 진짜 같아진다
+- 1차 단순 구현: 단일 lock으로 주문 처리 직렬화
+- 이후 개선: market 단위 queue/worker
 
-### 4.4 Ledger는 append-only
+처음 구현에서는 성능보다 정합성을 우선한다.
 
-`ledger_entries`는 수정/삭제하지 않는다.
+### 4.4 원장은 append-only
 
-| 필드 | 설명 |
+`wallet_ledgers`는 수정/삭제하지 않는다.
+
+필수 필드:
+
+| 필드 | 의미 |
 |---|---|
-| `wallet_id` | 대상 지갑 |
-| `entry_type` | 이동 유형 |
 | `delta_available` | available 변화량 |
 | `delta_locked` | locked 변화량 |
-| `available_after` | 이동 후 available |
-| `locked_after` | 이동 후 locked |
-| `reference_type` | 참조 유형 (ORDER / TRADE / CANCEL) |
+| `available_balance_after` | 변경 후 available |
+| `locked_balance_after` | 변경 후 locked |
+| `reference_type` | `SYSTEM`, `ORDER`, `TRADE` |
 | `reference_id` | 참조 ID |
-| `request_id` | idempotency key |
-
-### 4.5 Reconciliation이 킬러 기능
-
-"이력이 남아요" < "이력으로 현재 상태를 재검증할 수 있어요"
-
-배치 job이 ledger를 replay해서 wallet 잔고를 다시 계산하고, 현재 wallet 스냅샷과 비교한다.
+| `order_id` | 관련 주문 ID |
+| `trade_id` | 관련 체결 ID |
 
 ---
 
-## 5. 도메인 모델
+## 5. 도메인 모델 요약
+
+### User
+
+```text
+id, email, password_hash, nickname, status
+```
+
+### Asset
+
+```text
+code, name, display_name, asset_type, precision_unit, min_size, status
+```
+
+### Market
+
+```text
+symbol, base_asset, quote_asset,
+tick_size, step_size, min_order_quantity, min_order_amount,
+status, cancel_only
+```
 
 ### Wallet
-```
-user_id, asset_code, available_balance, locked_balance, version
-unique (user_id, asset_code)
+
+```text
+user_id, asset, available_balance, locked_balance, version
+unique(user_id, asset)
 ```
 
 ### Order
-```
-order_id, user_id, market, side, price,
-original_quantity, remaining_quantity, status, priority_seq
+
+```text
+user_id, market_id, market_symbol,
+side, type, time_in_force,
+price, original_quantity, remaining_quantity, executed_quantity,
+executed_quote_amount, locked_asset, locked_amount,
+status, sequence
 ```
 
 ### Trade
-```
-trade_id, buy_order_id, sell_order_id, price, quantity, executed_at
+
+```text
+market_id, market_symbol,
+buy_order_id, sell_order_id,
+maker_order_id, taker_order_id,
+buy_user_id, sell_user_id,
+price, quantity, quote_amount
 ```
 
-### LedgerEntry
-```
-ledger_id, wallet_id, entry_type,
-delta_available, delta_locked, available_after, locked_after,
-reference_type, reference_id, request_id
-```
+### WalletLedger
 
-### IdempotencyRequest
-```
-request_id, user_id, command_type, request_key,
-status, response_snapshot
-unique (user_id, command_type, request_key)
+```text
+user_id, wallet_id, asset, type,
+delta_available, delta_locked,
+available_balance_after, locked_balance_after,
+reference_type, reference_id, order_id, trade_id
 ```
 
 ---
@@ -145,62 +202,87 @@ unique (user_id, command_type, request_key)
 ## 6. 불변조건
 
 ### Wallet
-- `available_balance >= 0`
-- `locked_balance >= 0`
-- `available_balance + locked_balance = total_balance`
+
+```text
+available_balance >= 0
+locked_balance >= 0
+```
 
 ### Order
-- `remaining_quantity >= 0`
-- 동일 주문은 중복 FILLED 불가
-- 취소는 `OPEN`, `PARTIALLY_FILLED`만 가능
+
+```text
+original_quantity = executed_quantity + remaining_quantity
+remaining_quantity >= 0
+executed_quantity >= 0
+```
+
+취소된 주문도 위 수량 불변식은 유지한다. `CANCELED` 주문의 `remaining_quantity`는 취소된 잔여 수량이다.
 
 ### Trade
-- 체결 수량은 양측 `remaining_quantity` 초과 불가
-- 체결 시 buyer/seller 자산 이동은 ledger에 반드시 기록
 
-### Idempotency
-- 동일 `request_key`는 1회만 성공 처리
-- 재시도 시 최초 결과 그대로 반환
+```text
+quote_amount = price * quantity
+```
 
-### Reconciliation
-- ledger replay 결과와 wallet 스냅샷 차이 = 0
+### OrderBook
+
+```text
+오더북 포함: OPEN, PARTIALLY_FILLED
+오더북 제외: FILLED, CANCELED
+```
 
 ---
 
 ## 7. 처리 흐름
 
 ### 7.1 주문 생성
-```
-1. idempotency_requests 중복 확인
-2. MarketCoordinator 진입 (lock 획득)
-3. 사용자 wallet 조회
-4. 매수면 KRW, 매도면 BTC의 available 검사
-5. available -> locked 이동
-6. ledger 기록
-7. 주문 생성 (OPEN)
-8. 반대 side 최우선 주문부터 매칭 시도
-9. trade 생성, 양측 wallet 반영, ledger 기록
-10. 주문 상태를 OPEN / PARTIALLY_FILLED / FILLED로 갱신
-11. idempotency result snapshot 저장 후 반환
+
+```text
+1. JWT에서 currentUserId 추출
+2. market 조회
+3. market status 검증
+4. side/type/timeInForce 검증
+5. price tickSize 검증
+6. quantity stepSize 검증
+7. minOrderQuantity / minOrderAmount 검증
+8. clientOrderId 중복 검증
+9. order sequence 발급
+10. wallet row lock
+11. 자산 lock
+12. order 저장
+13. 메모리 오더북 후보 기준 매칭 계획 생성
+14. maker order row lock 및 상태 재검증
+15. trade 저장
+16. order 수량/상태 갱신
+17. wallet 정산
+18. wallet ledger 기록
+19. domain event 기록
+20. commit 이후 메모리 오더북 변경
 ```
 
 ### 7.2 주문 취소
-```
-1. idempotency_requests 확인
-2. MarketCoordinator 진입 (lock 획득)
-3. OPEN / PARTIALLY_FILLED만 취소 허용
-4. remaining_quantity 기준으로 locked 자산 복원
-5. ledger 기록
-6. 상태를 CANCELED로 변경
+
+```text
+1. JWT에서 currentUserId 추출
+2. order row lock
+3. 주문 소유자 검증
+4. 주문 상태 검증
+5. wallet row lock
+6. remainingQuantity 기준 잔여 locked 해제
+7. order 상태 CANCELED 변경
+8. wallet ledger 기록
+9. domain event 기록
+10. commit 이후 메모리 오더북에서 제거
 ```
 
-### 7.3 Reconciliation
-```
-1. 특정 user + asset 또는 전체 계정 대상
-2. ledger를 시간순 replay
-3. available / locked 재계산
-4. wallet 스냅샷과 비교
-5. mismatch 발생 시 로그/알림/테스트 실패 처리
+### 7.3 서버 시작 시 오더북 초기화
+
+```text
+1. ACTIVE market 조회
+2. market별 메모리 오더북 생성
+3. OPEN / PARTIALLY_FILLED 주문 조회
+4. sequence 기준으로 오더북 적재
+5. 주문 생성/취소 처리 준비
 ```
 
 ---
@@ -209,163 +291,213 @@ unique (user_id, command_type, request_key)
 
 | 구분 | 기술 | 이유 |
 |---|---|---|
-| Language | Java 21 | 최신 LTS |
-| Framework | Spring Boot 3.4.x | 트랜잭션/테스트/운영 편의 |
-| ORM | Spring Data JPA | 낙관적 락, 트랜잭션 경계 제어 |
-| DB | MySQL 8 | InnoDB 락 실험 가능 |
+| Language | Java 21 | LTS |
+| Framework | Spring Boot 3.5.x | 현재 프로젝트 기준 |
+| ORM | Spring Data JPA | 트랜잭션/락 처리 |
+| DB | MySQL 8 | InnoDB row lock 검증 |
 | Migration | Flyway | 스키마 버전 관리 |
-| Test | JUnit5 + Testcontainers | 통합 테스트와 정합성 검증 |
-| Load Test | k6 | mixed order/cancel 시나리오 실측 |
-| Metrics | Prometheus + Grafana | p95, error rate, DB connection 관측 |
-| Infra | Docker Compose | 단일 서버 실험 환경 |
-
-### 의도적으로 제외한 것
-- WebFlux - MVP correctness를 흐리지 않기 위해
-- Kafka - Phase 4로 분리
-- WebSocket - Phase 4로 분리
-- Redis 중심 설계 - DB를 source of truth로 고정
+| Auth | Spring Security + JWT | 로그인 사용자 식별 |
+| Test | JUnit5 + Testcontainers | DB 통합 테스트 |
+| Metrics | Actuator + Prometheus | 운영 관측 기반 |
 
 ---
 
-## 9. 성능 및 검증 목표
+## 9. 구현 단계
 
-### 정합성 목표
-- 동시 주문/취소 혼합 1,000건 기준 잔고 음수 0건
-- duplicate fill 0건
-- idempotency 재시도 오류 0건
-- ledger replay mismatch 0건
+### Phase 1. Auth / Schema / Seed
 
-### 성능 목표
-- 주문 생성 TPS >= 200
-- 주문 생성 p95 <= 500ms
-- mixed order/cancel 오류율 < 1%
-- 매칭 구간 병목 원인 문서화 완료
+목표: 사용자 식별과 초기 데이터 기반 구축
 
-### 필수 테스트
-- 동일 요청 재시도 테스트 (idempotency)
-- 같은 가격 주문의 priority_seq 검증 테스트
-- 부분 체결 테스트
-- cancel vs fill race 테스트
-- ledger replay 정합성 테스트
+- Security/JWT 의존성 추가
+- Flyway V1 migration 작성
+- `users`, `assets`, `markets`, `wallets` seed 작성
+- 회원가입 API
+- 로그인 API
+- 현재 사용자 조회 API
+
+완료 기준:
+
+- 회원가입 시 password hash 저장
+- 로그인 시 JWT access token 발급
+- JWT로 `/api/v1/users/me` 조회 가능
+- seed market과 seed wallet 확인 가능
+
+### Phase 2. Wallet / Ledger
+
+목표: 자산 잠금/해제와 원장 기록 기반 구축
+
+- Wallet entity/repository
+- WalletLedger entity/repository
+- wallet row lock 조회
+- available -> locked 이동
+- locked -> available 해제
+- 정산용 delta 변경
+- 지갑/원장 조회 API
+
+완료 기준:
+
+- BUY 주문 lock에 필요한 KRW 잠금 가능
+- SELL 주문 lock에 필요한 BTC 잠금 가능
+- 모든 wallet 변경이 `wallet_ledgers`에 기록
+- 음수 잔고 방지
+
+### Phase 3. Order Create / Cancel
+
+목표: 매칭 없는 주문 생성/취소 완성
+
+- Market 조회/검증
+- Order entity/repository
+- OrderSequence 발급
+- clientOrderId 중복 검증
+- BUY/SELL 주문 생성 시 자산 lock
+- 주문 취소 시 잔여 lock 해제
+- 주문 단건/목록 조회 API
+
+완료 기준:
+
+- BUY 주문 생성 시 KRW locked 증가
+- SELL 주문 생성 시 BTC locked 증가
+- OPEN 주문 취소 시 locked 해제
+- PARTIALLY_FILLED 취소 정책 준비
+
+### Phase 4. OrderBook / Matching
+
+목표: 가격-시간 우선 매칭 구현
+
+- MemoryOrderBook
+- OrderBookStore
+- MatchingEngine
+- 가격 우선 매칭
+- sequence 기반 시간 우선 매칭
+- 자기 체결 거절
+- 오더북 조회 API
+- 서버 시작 시 오더북 초기화
+
+완료 기준:
+
+- 가격 우선 테스트 통과
+- 시간 우선 테스트 통과
+- 오더북에는 OPEN/PARTIALLY_FILLED 주문만 존재
+
+### Phase 5. Trade / Settlement
+
+목표: 체결 저장과 지갑 정산 완성
+
+- Trade entity/repository
+- 체결 생성
+- 주문 수량/상태 갱신
+- BUY 정산
+- SELL 정산
+- 정산 ledger 기록
+- domain event 기록
+- 시장 체결 조회 API
+- 사용자 fill 조회 API
+
+완료 기준:
+
+- 부분 체결 처리
+- 완전 체결 처리
+- BUY taker 가격 차이 환불 처리
+- seller quote 증가 처리
+- 체결 후 wallet/ledger/order/trade 정합성 유지
+
+### Phase 6. Integration Test / Stabilization
+
+목표: MVP 완료 기준 검증
+
+- [TestPlan.md](./TestPlan.md) 기반 통합 테스트
+- 잔액 부족 테스트
+- 자기 체결 거절 테스트
+- 취소 불가 상태 테스트
+- 오더북 초기화 테스트
+- 조회 API 검증
+
+완료 기준:
+
+- 지갑 음수 0건
+- 주문 수량 불변식 유지
+- 체결 금액 불변식 유지
+- 오더북 불변식 유지
+- MVP 정상 시나리오 end-to-end 통과
 
 ---
 
-## 10. 구현 단계
+## 10. 후순위 확장
 
-### Phase 1. Wallet / Ledger / Idempotency
-**목표:** 자산 관리 기반 구축
+아래 항목은 MVP 구현 완료 후 별도 phase에서 다룬다.
 
-- user, wallet, deposit API
-- append-only ledger 구현
-- idempotency_requests 구현
-- 지갑 불변조건 테스트
+### Idempotency 고도화
 
-**완료 기준:**
-- 음수 잔고 재현 케이스 차단
-- request 재시도 시 동일 결과 반환
+1차 MVP에서는 `orders.user_id + client_order_id` unique constraint로 주문 중복을 방지한다.
 
----
+`idempotency_requests`는 API command 단위 멱등성 확장을 위한 예약 테이블이다. 1차 구현 필수 대상이 아니다.
 
-### Phase 2. Matching Engine
-**목표:** 거래소 코어 구현
+### Event Outbox
 
-- order create / cancel
-- MarketCoordinator (ReentrantLock)
-- price-time priority (priority_seq)
-- partial fill
-- trade 반영 + wallet + ledger
+MVP에서는 `domain_events`를 내부 이벤트 로그로만 사용한다.
 
-**완료 기준:**
-- 동시 주문/취소 시나리오에서 duplicate fill 0
-- cancel/fill race 테스트 통과
+`published`, `published_at`, `publish_attempts`는 Kafka/outbox 확장을 위한 예약 필드이며 MVP에서는 외부 발행을 구현하지 않는다.
+
+### Reconciliation / Replay
+
+ledger replay, recovery, redrive는 MVP에서 제외한다.
+
+다만 `wallet_ledgers` 구조는 이후 reconciliation 구현이 가능하도록 append-only로 유지한다.
+
+### Realtime
+
+Kafka, Redis, WebSocket, 서버 분리는 MVP 이후 확장으로 둔다.
 
 ---
 
-### Phase 3. Measurement / Reconciliation
-**목표:** 수치 증명 + 정합성 재검증
+## 11. 패키지 구조
 
-- k6 mixed scenario
-- Prometheus / Grafana 대시보드
-- ledger replay reconciliation job
-- 병목 분석 및 개선
+초기 구현 기준 패키지 구조:
 
-**완료 기준:**
-- 이력서에 넣을 수 있는 수치 2개 이상 확보
-- reconciliation mismatch 0
-
----
-
-### Phase 4. Optional Expansion
-**목표:** 실시간 피드 확장
-
-- outbox pattern
-- Kafka
-- WebSocket orderbook / recent trades broadcast
-
-**완료 기준:**
-- MVP와 독립적으로 설명 가능
-
----
-
-## 11. Spring Initializr 설정
-
-### 기본 설정
-| 항목 | 값 |
-|---|---|
-| Project | Gradle - Groovy |
-| Language | Java |
-| Spring Boot | 3.4.x |
-| Group | `com.coinflow` |
-| Artifact | `coinflow` |
-| Package name | `com.coinflow` |
-| Packaging | Jar |
-| Java | 21 |
-
-### Dependencies
-| 분류 | 의존성 | 용도 |
-|---|---|---|
-| Web | Spring Web | REST API |
-| Data | Spring Data JPA | ORM |
-| Data | Flyway Migration | 스키마 버전 관리 |
-| Data | MySQL Driver | DB 드라이버 |
-| Validation | Validation | `@Valid`, `@NotNull` |
-| Ops | Spring Boot Actuator | Prometheus 메트릭 |
-| Dev | Lombok | 보일러플레이트 제거 |
-
-> WebSocket, Redis, Security는 Phase 4 또는 필요 시 추가
-
----
-
-## 12. 패키지 구조
-
-```
+```text
 com.coinflow
-├── account          # 사용자, 지갑, 입금
-│   ├── domain
+├── auth
+│   ├── api
 │   ├── application
-│   └── api
-├── order            # 주문 생성/취소
 │   ├── domain
+│   └── infrastructure
+├── market
+│   ├── api
 │   ├── application
-│   └── api
-├── matching         # MarketCoordinator, 매칭 엔진
-│   ├── domain
-│   └── application
-├── trade            # 체결 기록, 조회
-│   ├── domain
-│   └── api
-├── ledger           # append-only ledger, reconciliation
-│   ├── domain
-│   └── application
-└── common           # 공통 예외, 응답, idempotency
+│   └── domain
+├── wallet
+│   ├── api
+│   ├── application
+│   └── domain
+├── order
+│   ├── api
+│   ├── application
+│   └── domain
+├── matching
+│   ├── application
+│   └── domain
+├── trade
+│   ├── api
+│   ├── application
+│   └── domain
+├── event
+│   ├── application
+│   └── domain
+└── common
+    ├── exception
+    ├── money
+    ├── security
+    └── time
 ```
+
+입금/출금 패키지는 MVP에서 만들지 않는다.
 
 ---
 
-## 13. 이력서 문장 (완성 후)
+## 12. 이력서 문장 후보
 
-- 단일 서버 환경에서 BTC/KRW 단일 마켓의 주문 생성, 자산 잠금, 부분 체결, 취소를 포함한 거래소 코어 백엔드 구현
-- `available/locked` 분리와 append-only ledger 설계를 통해 자산 이동 이력을 추적 가능하게 구성
-- 단일 마켓 coordinator와 `priority_seq`를 통해 가격·시간 우선 매칭과 cancel/fill race를 통제
-- DB 기반 idempotency와 ledger replay reconciliation으로 중복 요청 및 정합성 검증 구조 구현
-- k6, Prometheus, Grafana 기반 mixed order/cancel 시나리오 측정 및 병목 개선
+- 단일 인스턴스 환경에서 지정가 주문 생성, 자산 잠금, 가격-시간 우선 매칭, 부분/완전 체결, 취소를 포함한 거래소 코어 백엔드 MVP 구현
+- JWT 기반 사용자 식별과 `available/locked` 지갑 모델을 통해 계정별 자산 분리와 주문 잠금을 구현
+- `orders.sequence` 기반 시간 우선순위와 메모리 오더북을 사용해 매칭 후보 조회와 호가 조회 모델 구성
+- `wallet_ledgers` append-only 원장으로 주문 lock, 취소 release, 체결 정산 이력을 추적 가능하게 설계
+- 주문, 체결, 지갑, 원장, 이벤트 로그를 하나의 트랜잭션 경계에서 기록해 자산 정합성을 검증
