@@ -3,9 +3,9 @@
 -- ============================================================
 -- Import note:
 -- This file is intentionally simpler than the implementation DDL.
--- It keeps tables, columns, primary keys, unique keys, and foreign keys.
--- CHECK constraints, engine options, complex index directions, and
--- DB-specific runtime details are omitted for ERD Cloud compatibility.
+-- It keeps tables, columns, primary keys, unique keys, foreign keys, and indexes.
+-- CHECK constraints, engine options, and index direction (DESC/ASC) are omitted
+-- for ERD Cloud compatibility. Index columns are listed without direction markers.
 
 CREATE TABLE users (
     id             BIGINT       NOT NULL AUTO_INCREMENT,
@@ -24,10 +24,6 @@ CREATE TABLE assets (
     code             VARCHAR(20)     NOT NULL,
     name             VARCHAR(100)    NOT NULL,
     display_name     VARCHAR(100)    NOT NULL,
-    asset_type       VARCHAR(20)     NOT NULL,
-    symbol           VARCHAR(20)     NULL,
-    precision_unit   DECIMAL(38, 18) NOT NULL,
-    min_size         DECIMAL(38, 18) NOT NULL,
     status           VARCHAR(20)     NOT NULL,
     created_at       DATETIME        NOT NULL,
     updated_at       DATETIME        NOT NULL,
@@ -42,8 +38,6 @@ CREATE TABLE markets (
     base_asset          VARCHAR(20)     NOT NULL,
     quote_asset         VARCHAR(20)     NOT NULL,
 
-    price_scale         INT             NOT NULL,
-    quantity_scale      INT             NOT NULL,
     amount_scale        INT             NOT NULL,
 
     tick_size           DECIMAL(38, 18) NOT NULL,
@@ -52,7 +46,6 @@ CREATE TABLE markets (
     min_order_amount    DECIMAL(38, 18) NOT NULL,
 
     status              VARCHAR(20)     NOT NULL,
-    status_message      VARCHAR(255)    NOT NULL,
     cancel_only         TINYINT         NOT NULL,
     created_at          DATETIME        NOT NULL,
     updated_at          DATETIME        NOT NULL,
@@ -69,7 +62,6 @@ CREATE TABLE wallets (
     asset               VARCHAR(20)     NOT NULL,
     available_balance   DECIMAL(38, 18) NOT NULL,
     locked_balance      DECIMAL(38, 18) NOT NULL,
-    version             BIGINT          NOT NULL,
     created_at          DATETIME        NOT NULL,
     updated_at          DATETIME        NOT NULL,
 
@@ -114,14 +106,18 @@ CREATE TABLE orders (
     created_at             DATETIME        NOT NULL,
     updated_at             DATETIME        NOT NULL,
     closed_at              DATETIME        NULL,
-    closed_reason          VARCHAR(30)     NULL,
 
     PRIMARY KEY (id),
     UNIQUE KEY uq_orders_user_client_order (user_id, client_order_id),
     UNIQUE KEY uq_orders_market_sequence (market_id, sequence),
     CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id),
     CONSTRAINT fk_orders_market FOREIGN KEY (market_id) REFERENCES markets (id),
-    CONSTRAINT fk_orders_locked_asset FOREIGN KEY (locked_asset) REFERENCES assets (code)
+    CONSTRAINT fk_orders_locked_asset FOREIGN KEY (locked_asset) REFERENCES assets (code),
+
+    INDEX idx_orders_user_created (user_id, created_at),
+    INDEX idx_orders_user_market_status_created (user_id, market_id, status, created_at),
+    INDEX idx_orders_book_buy (market_id, status, side, price, sequence),
+    INDEX idx_orders_book_sell (market_id, status, side, price, sequence)
 );
 
 CREATE TABLE trades (
@@ -151,7 +147,15 @@ CREATE TABLE trades (
     CONSTRAINT fk_trades_maker_order FOREIGN KEY (maker_order_id) REFERENCES orders (id),
     CONSTRAINT fk_trades_taker_order FOREIGN KEY (taker_order_id) REFERENCES orders (id),
     CONSTRAINT fk_trades_buy_user FOREIGN KEY (buy_user_id) REFERENCES users (id),
-    CONSTRAINT fk_trades_sell_user FOREIGN KEY (sell_user_id) REFERENCES users (id)
+    CONSTRAINT fk_trades_sell_user FOREIGN KEY (sell_user_id) REFERENCES users (id),
+
+    INDEX idx_trades_market_traded (market_id, traded_at),
+    INDEX idx_trades_buy_order (buy_order_id),
+    INDEX idx_trades_sell_order (sell_order_id),
+    INDEX idx_trades_maker_order (maker_order_id),
+    INDEX idx_trades_taker_order (taker_order_id),
+    INDEX idx_trades_buy_user_traded (buy_user_id, traded_at),
+    INDEX idx_trades_sell_user_traded (sell_user_id, traded_at)
 );
 
 CREATE TABLE wallet_ledgers (
@@ -167,11 +171,8 @@ CREATE TABLE wallet_ledgers (
     available_balance_after  DECIMAL(38, 18) NOT NULL,
     locked_balance_after     DECIMAL(38, 18) NOT NULL,
 
-    reference_type           VARCHAR(30)     NOT NULL,
-    reference_id             BIGINT          NULL,
     order_id                 BIGINT          NULL,
     trade_id                 BIGINT          NULL,
-    description              VARCHAR(255)    NULL,
 
     created_at               DATETIME        NOT NULL,
 
@@ -180,7 +181,13 @@ CREATE TABLE wallet_ledgers (
     CONSTRAINT fk_wallet_ledgers_wallet FOREIGN KEY (wallet_id) REFERENCES wallets (id),
     CONSTRAINT fk_wallet_ledgers_asset FOREIGN KEY (asset) REFERENCES assets (code),
     CONSTRAINT fk_wallet_ledgers_order FOREIGN KEY (order_id) REFERENCES orders (id),
-    CONSTRAINT fk_wallet_ledgers_trade FOREIGN KEY (trade_id) REFERENCES trades (id)
+    CONSTRAINT fk_wallet_ledgers_trade FOREIGN KEY (trade_id) REFERENCES trades (id),
+
+    INDEX idx_wallet_ledgers_user_created (user_id, created_at),
+    INDEX idx_wallet_ledgers_user_asset_created (user_id, asset, created_at),
+    INDEX idx_wallet_ledgers_wallet_created (wallet_id, created_at),
+    INDEX idx_wallet_ledgers_order (order_id),
+    INDEX idx_wallet_ledgers_trade (trade_id)
 );
 
 CREATE TABLE domain_events (
@@ -202,21 +209,10 @@ CREATE TABLE domain_events (
     created_at        DATETIME     NOT NULL,
 
     PRIMARY KEY (id),
-    CONSTRAINT fk_domain_events_market FOREIGN KEY (market_id) REFERENCES markets (id)
-);
+    CONSTRAINT fk_domain_events_market FOREIGN KEY (market_id) REFERENCES markets (id),
 
-CREATE TABLE idempotency_requests (
-    id                 BIGINT       NOT NULL AUTO_INCREMENT,
-    user_id            BIGINT       NOT NULL,
-    command_type       VARCHAR(40)  NOT NULL,
-    request_key        VARCHAR(100) NOT NULL,
-    request_hash       VARCHAR(128) NOT NULL,
-    status             VARCHAR(20)  NOT NULL,
-    response_snapshot  TEXT         NULL,
-    created_at         DATETIME     NOT NULL,
-    updated_at         DATETIME     NOT NULL,
-
-    PRIMARY KEY (id),
-    UNIQUE KEY uq_idempotency_user_command_key (user_id, command_type, request_key),
-    CONSTRAINT fk_idempotency_user FOREIGN KEY (user_id) REFERENCES users (id)
+    INDEX idx_domain_events_aggregate (aggregate_type, aggregate_id),
+    INDEX idx_domain_events_market_created (market_id, created_at),
+    INDEX idx_domain_events_type_created (event_type, created_at),
+    INDEX idx_domain_events_published_created (published, created_at)
 );

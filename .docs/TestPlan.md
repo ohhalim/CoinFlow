@@ -17,16 +17,16 @@
 
 ### Assets
 
-| asset | type | precision |
-|---|---|---|
-| `KRW` | FIAT | `1` |
-| `BTC` | CRYPTO | `0.00000001` |
+| asset | name | displayName | status |
+|---|---|---|---|
+| `KRW` | Korean Won | 원화 | ACTIVE |
+| `BTC` | Bitcoin | 비트코인 | ACTIVE |
 
 ### Market
 
-| market | base | quote | tickSize | stepSize | minOrderQuantity | minOrderAmount |
-|---|---|---|---|---|---|---|
-| `BTC-KRW` | BTC | KRW | `1` | `0.00000001` | `0.0001` | `5000` |
+| market | base | quote | amountScale | tickSize | stepSize | minOrderQuantity | minOrderAmount |
+|---|---|---|---:|---|---|---|---|
+| `BTC-KRW` | BTC | KRW | `0` | `1` | `0.00000001` | `0.0001` | `5000` |
 
 ### Users / Wallets
 
@@ -52,6 +52,8 @@ Then:
 - user가 생성된다.
 - password는 평문 저장되지 않는다.
 - 응답에 password는 포함되지 않는다.
+- ACTIVE 상태인 모든 asset에 대해 wallet이 생성된다 (available=0, locked=0).
+- wallet 생성은 signup 트랜잭션 안에서 처리되므로 user 생성 롤백 시 wallet도 함께 롤백된다.
 
 ### AUTH-002 로그인 성공
 
@@ -147,29 +149,29 @@ Then:
 
 Given:
 
-- ask1: `SELL price=10000, quantity=0.1`
-- ask2: `SELL price=9900, quantity=0.1`
-- ask3: `SELL price=9800, quantity=0.1`
+- ask1: `SELL price=100000, quantity=0.1` (주문금액 10000 ≥ minOrderAmount 5000)
+- ask2: `SELL price=98000, quantity=0.1` (주문금액 9800 ≥ 5000)
+- ask3: `SELL price=96000, quantity=0.1` (주문금액 9600 ≥ 5000)
 
 When:
 
-- buyer가 `BUY price=10000, quantity=0.3` 주문 생성
+- buyer가 `BUY price=100000, quantity=0.3` 주문 생성 (주문금액 30000 ≥ 5000)
 
 Then:
 
-- 체결 순서는 `9800 -> 9900 -> 10000`이다.
+- 체결 순서는 `96000 -> 98000 -> 100000`이다.
 - trade 3건이 생성된다.
 
 ### MAT-002 시간 우선 매칭
 
 Given:
 
-- ask1: `SELL price=10000, quantity=0.1, sequence=1`
-- ask2: `SELL price=10000, quantity=0.1, sequence=2`
+- ask1: `SELL price=100000, quantity=0.1, sequence=1` (주문금액 10000 ≥ 5000)
+- ask2: `SELL price=100000, quantity=0.1, sequence=2`
 
 When:
 
-- buyer가 `BUY price=10000, quantity=0.2` 주문 생성
+- buyer가 `BUY price=100000, quantity=0.2` 주문 생성 (주문금액 20000 ≥ 5000)
 
 Then:
 
@@ -180,11 +182,11 @@ Then:
 
 Given:
 
-- seller order: `SELL price=10000, quantity=0.5`
+- seller order: `SELL price=100000, quantity=0.5` (주문금액 50000 ≥ 5000)
 
 When:
 
-- buyer가 `BUY price=10000, quantity=0.2` 주문 생성
+- buyer가 `BUY price=100000, quantity=0.2` 주문 생성 (주문금액 20000 ≥ 5000)
 
 Then:
 
@@ -198,11 +200,11 @@ Then:
 
 Given:
 
-- seller order: `SELL price=10000, quantity=0.5`
+- seller order: `SELL price=100000, quantity=0.5` (주문금액 50000 ≥ 5000)
 
 When:
 
-- buyer가 `BUY price=10000, quantity=0.5` 주문 생성
+- buyer가 `BUY price=100000, quantity=0.5` 주문 생성 (주문금액 50000 ≥ 5000)
 
 Then:
 
@@ -215,39 +217,129 @@ Then:
 
 Given:
 
-- seller가 `SELL price=9900, quantity=0.2` 주문 생성
+- seller가 `SELL price=98000, quantity=0.2` 주문 생성 (주문금액 19600 ≥ 5000)
 - buyer KRW available = `1000000`
 
 When:
 
-- buyer가 `BUY price=10000, quantity=0.2` 주문 생성
+- buyer가 `BUY price=100000, quantity=0.2` 주문 생성 (주문금액 20000 ≥ 5000)
 
 Then:
 
-- 체결 가격 = `9900`
-- trade quoteAmount = `1980`
-- buyer KRW locked 감소 = `2000`
-- buyer KRW available 환불 = `20`
+- 체결 가격 = `98000` (maker = seller)
+- trade quoteAmount = DOWN(98000 * 0.2, amountScale=0) = `19600`
+- buyer KRW locked 초기값 = CEILING(100000 * 0.2, 0) = `20000`
+- buyer new remaining = 0, new locked = 0, released = `20000`
+- buyer KRW locked 감소 = `20000`
+- buyer KRW available 환불 = released - quoteAmount = 20000 - 19600 = `400`
 - buyer BTC available 증가 = `0.2`
 - seller BTC locked 감소 = `0.2`
-- seller KRW available 증가 = `1980`
+- seller KRW available 증가 = `19600`
 - 정산 ledger가 기록된다.
 
-### SET-002 SELF_TRADE_NOT_ALLOWED
+### SET-001b BUY taker 다중 부분 체결 수치 고정
+
+rounding이 누적되어도 공식이 깨지지 않음을 검증한다.
 
 Given:
 
-- user1이 `SELL price=10000, quantity=0.5` 주문 생성
+- ask1: `SELL price=98000, quantity=0.1` (seller, sequence=1)
+- ask2: `SELL price=99000, quantity=0.1` (seller, sequence=2)
+- buyer KRW available = `1000000`
 
 When:
 
-- user1이 `BUY price=10000, quantity=0.5` 주문 생성
+- buyer가 `BUY price=100000, quantity=0.2` 주문 생성 (amountScale=0)
 
 Then:
 
+1차 체결 (ask1, maker price=98000):
+- trade quoteAmount = DOWN(98000 * 0.1, 0) = `9800`
+- old_locked = CEILING(100000 * 0.2, 0) = `20000`
+- new_locked = CEILING(100000 * 0.1, 0) = `10000`
+- released = 20000 - 10000 = `10000`
+- buyer KRW available 환불 = 10000 - 9800 = `200`
+
+2차 체결 (ask2, maker price=99000):
+- trade quoteAmount = DOWN(99000 * 0.1, 0) = `9900`
+- old_locked = `10000` (1차 체결 후 갱신된 값)
+- new_locked = CEILING(100000 * 0, 0) = `0`
+- released = 10000 - 0 = `10000`
+- buyer KRW available 환불 = 10000 - 9900 = `100`
+
+최종:
+- buyer BTC available 증가 = `0.2`
+- buyer KRW 총 환불 = 200 + 100 = `300`
+- buyer order status = `FILLED`, lockedAmount = `0`
+- 구현에서 `old_locked`는 체결마다 갱신된 `order.lockedAmount`를 사용해야 한다. 최초 locked를 고정하거나 단순 차감하면 틀린다.
+
+### SET-002 SELL taker 정산
+
+Given:
+
+- buyer가 `BUY price=100000, quantity=0.2` 주문 생성 (오더북에 OPEN 상태로 존재)
+- buyer KRW locked 초기값 = CEILING(100000 * 0.2, amountScale=0) = `20000`
+- seller BTC available = `10`
+
+When:
+
+- seller가 `SELL price=100000, quantity=0.2` 주문 생성 (taker)
+
+Then:
+
+- 체결 가격 = `100000` (maker = buyer)
+- trade quoteAmount = DOWN(100000 * 0.2, amountScale=0) = `20000`
+- seller BTC locked = `0.2` (주문 생성 시 lock)
+- seller BTC locked 감소 = `0.2` (체결 정산)
+- seller KRW available 증가 = `20000`
+- buyer KRW locked 감소 = `20000` (new remaining = 0, new locked = 0, released = 20000)
+- buyer KRW available 환불 = released - quoteAmount = 20000 - 20000 = `0`
+- buyer BTC available 증가 = `0.2`
+- buyer order status = `FILLED`, seller order status = `FILLED`
+- 정산 ledger가 기록된다:
+  - seller: `ORDER_LOCK`(BTC -0.2), `TRADE_SELL_BASE_SETTLE`(BTC locked -0.2), `TRADE_SELL_QUOTE_CREDIT`(KRW available +20000)
+  - buyer: `TRADE_BUY_QUOTE_SETTLE`(KRW locked -20000), `TRADE_BUY_BASE_CREDIT`(BTC available +0.2)
+
+### SET-004 SELF_TRADE_NOT_ALLOWED — 단순 케이스
+
+Given:
+
+- user1이 `SELL price=100000, quantity=0.5` 주문 생성 (주문금액 50000 ≥ 5000)
+
+When:
+
+- user1이 `BUY price=100000, quantity=0.5` 주문 생성 (주문금액 50000 ≥ 5000)
+
+Then:
+
+- 매칭 후보 목록 생성 시 user1의 SELL 주문이 발견된다.
 - `SELF_TRADE_NOT_ALLOWED` 에러가 반환된다.
 - taker order는 저장되지 않는다.
-- wallet balance가 변경되지 않는다.
+- wallet balance, ledger, trade 변경 없음.
+
+### SET-005 SELF_TRADE_NOT_ALLOWED — 혼합 후보 케이스
+
+매칭 후보 중 타인 주문과 자기 주문이 섞인 경우에도 taker 전체가 거절되어야 한다.
+
+Given:
+
+- user2가 `SELL price=100000, quantity=0.1, sequence=1` 주문 생성 (타인 주문, 먼저 등록)
+- user1이 `SELL price=100000, quantity=0.1, sequence=2` 주문 생성 (자기 주문, 나중에 등록)
+
+When:
+
+- user1이 `BUY price=100000, quantity=0.2` 주문 생성
+
+Then:
+
+- 매칭 후보 집합 = [user2 SELL(seq=1), user1 SELL(seq=2)] — 두 주문 모두 crossing
+- 후보 집합 전체를 먼저 수집한 뒤 user1의 주문이 포함되어 있음을 확인한다
+- `SELF_TRADE_NOT_ALLOWED` 에러가 반환된다
+- taker order는 저장되지 않는다
+- user2 주문은 오더북에 그대로 유지된다
+- wallet balance, ledger, trade 변경 없음
+
+> 구현 시 주의: "탐색 중 자기 주문이 나오면 즉시 중단" 방식이면 이 케이스에서 user2 주문을 먼저 발견하고 체결을 진행할 수 있다. 반드시 crossing 후보 집합 전체를 확정한 뒤 자기 주문 여부를 검사해야 한다.
 
 ## 6. Cancel
 
@@ -372,6 +464,42 @@ Then:
 - `OPEN`, `PARTIALLY_FILLED` 주문만 메모리 오더북에 적재된다.
 - `FILLED`, `CANCELED` 주문은 적재되지 않는다.
 
+### SYS-002 오더북 재시작 후 매칭 정합성
+
+오더북 초기화 이후 바로 주문을 처리해도 정합성이 유지되어야 한다.
+
+Given:
+
+- DB에 `OPEN` 상태의 SELL 주문이 존재: `SELL price=100000, quantity=0.5`
+- 애플리케이션 재시작
+
+When:
+
+- 재시작 후 buyer가 `BUY price=100000, quantity=0.2` 주문 생성
+
+Then:
+
+- SELL 주문이 오더북에 있으므로 정상 매칭된다.
+- trade가 생성된다.
+- SELL 주문 remainingQuantity = `0.3`, status = `PARTIALLY_FILLED`
+- BUY 주문 status = `FILLED`
+- wallet 정산이 정상적으로 기록된다.
+
+### SYS-003 오더북 rebuild 이후 cancel_only 전환
+
+commit 이후 오더북 반영 실패 시 재빌드 → 재빌드도 실패 시 cancel_only 전환 정책 검증.
+
+Given:
+
+- 정상 주문/체결 후 오더북 반영 중 예외 발생 시뮬레이션 (DB는 이미 commit됨)
+
+Then:
+
+- DB commit 데이터는 변경되지 않는다.
+- 오더북 재빌드가 시도된다.
+- 재빌드 성공 시: 해당 market 오더북이 DB 기준으로 복원되고, 이후 주문 처리가 정상 동작한다.
+- 재빌드 실패 시: 해당 market이 `cancel_only = true`로 전환되고, 신규 주문은 `MARKET_CANCEL_ONLY`를 반환한다.
+
 ## 9. Invariants
 
 모든 통합 테스트 후 아래 불변식을 검증한다.
@@ -380,7 +508,7 @@ Then:
 wallet.available_balance >= 0
 wallet.locked_balance >= 0
 order.original_quantity = order.executed_quantity + order.remaining_quantity
-trade.quote_amount = trade.price * trade.quantity
+trade.quote_amount = DOWN(trade.price * trade.quantity, market.amountScale)
 OPEN/PARTIALLY_FILLED 주문만 오더북에 존재
 FILLED/CANCELED 주문은 오더북에 없음
 ```

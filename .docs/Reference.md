@@ -42,7 +42,7 @@ CoinFlow MVP는 거래소의 모든 기능을 구현하는 프로젝트가 아�
 | 트랜잭션 commit 이후 메모리 오더북 변경 | DB 저장 실패 후 메모리 오더북만 바뀌는 불일치를 막기 위한 기준이다. |
 | 동일 시장 명령 순차 처리 | 같은 market의 주문 생성/취소/매칭이 동시에 섞이면 체결 순서와 잔량 정합성이 깨질 수 있다. MVP에서는 성능보다 정합성을 우선한다. |
 | `domain_events` 저장 | MVP에서는 내부 이벤트 로그로 사용하고, 이후 outbox/Kafka 확장 시 같은 경계를 사용할 수 있게 한다. |
-| `idempotency_requests` 예약 | 1차는 `client_order_id` unique constraint로 주문 중복을 막고, 이후 취소 같은 command 재시도까지 확장할 수 있게 테이블을 남긴다. |
+| `idempotency_requests` 제외 | 1차는 `client_order_id` unique constraint로 주문 중복을 막는다. 취소 같은 command 재시도까지 멱등하게 만들 때 별도 테이블을 추가한다. |
 | 입금/출금 패키지 제외 | 입출금은 외부 은행/블록체인 연동, 승인/실패/환불, tx id 중복, 보안 정책이 필요한 별도 도메인이다. MVP의 주문-체결-정산 검증 범위와 분리한다. |
 
 ---
@@ -77,7 +77,7 @@ MVP에서는 외부 메시지 발행까지 구현하지 않는다. 대신 주문
 wallet.available_balance >= 0
 wallet.locked_balance >= 0
 order.original_quantity = order.executed_quantity + order.remaining_quantity
-trade.quote_amount = trade.price * trade.quantity
+trade.quote_amount = DOWN(trade.price * trade.quantity, market.amount_scale)
 오더북에는 OPEN, PARTIALLY_FILLED 주문만 존재
 FILLED, CANCELED 주문은 오더북에 없음
 ```
@@ -138,12 +138,83 @@ FILLED, CANCELED 주문은 오더북에 없음
 | 비밀번호 저장 | [OWASP Password Storage Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html) | password plain text 저장 금지, adaptive hash 사용 근거 |
 | DB row lock | [MySQL InnoDB Locking Reads](https://dev.mysql.com/doc/refman/8.4/en/innodb-locking-reads.html) | wallet row lock, order sequence 발급, maker order 상태 재검증 설계 근거 |
 | Spring Data JPA lock | [Spring Data JPA Locking](https://docs.spring.io/spring-data/jpa/reference/jpa/locking.html) | repository에서 pessimistic lock을 적용하는 구현 참고 |
-| API 멱등성 | [Stripe Idempotent Requests](https://docs.stripe.com/api/idempotent_requests) | `client_order_id`, `idempotency_requests` 확장 방향 참고 |
+| API 멱등성 | [Stripe Idempotent Requests](https://docs.stripe.com/api/idempotent_requests) | 1차는 `client_order_id`로 주문 중복을 막고, command 단위 멱등성은 후순위 확장으로 참고 |
 | Transactional outbox | [Transactional Outbox Pattern](https://microservices.io/patterns/data/transactional-outbox) | `domain_events`를 이벤트 로그이자 outbox 후보로 둔 이유 |
 
 ---
 
-## 7. 후순위 확장 방향
+## 7. domain_events payload 최소 계약
+
+MVP에서는 내부 이벤트 로그이지만, 이후 outbox/Kafka 확장 시 payload 스키마가 변경되면 consumer 호환성이 깨진다. 아래는 이벤트 타입별 최소 payload 예시이며 구현의 직렬화 기준으로 사용한다.
+
+```json
+// ORDER_ACCEPTED
+{
+  "orderId": 1001,
+  "userId": 1,
+  "marketSymbol": "BTC-KRW",
+  "side": "BUY",
+  "type": "LIMIT",
+  "price": "100000",
+  "quantity": "0.5",
+  "sequence": 1
+}
+
+// ORDER_PARTIALLY_FILLED
+{
+  "orderId": 1001,
+  "userId": 1,
+  "marketSymbol": "BTC-KRW",
+  "executedQuantity": "0.2",
+  "remainingQuantity": "0.3",
+  "tradeId": 501
+}
+
+// ORDER_FILLED
+{
+  "orderId": 1001,
+  "userId": 1,
+  "marketSymbol": "BTC-KRW",
+  "executedQuantity": "0.5",
+  "tradeId": 502
+}
+
+// ORDER_CANCELED
+{
+  "orderId": 1001,
+  "userId": 1,
+  "marketSymbol": "BTC-KRW",
+  "remainingQuantity": "0.3",
+  "releasedAsset": "KRW",
+  "releasedAmount": "30000"
+}
+
+// TRADE_CREATED
+{
+  "tradeId": 501,
+  "marketSymbol": "BTC-KRW",
+  "buyOrderId": 1001,
+  "sellOrderId": 900,
+  "makerOrderId": 900,
+  "takerOrderId": 1001,
+  "price": "98000",
+  "quantity": "0.2",
+  "quoteAmount": "19600"
+}
+
+// SETTLEMENT_COMPLETED
+{
+  "tradeId": 501,
+  "marketSymbol": "BTC-KRW",
+  "buyUserId": 1,
+  "sellUserId": 2,
+  "buyerBaseCredit": "0.2",
+  "buyerQuoteRefund": "400",
+  "sellerQuoteCredit": "19600"
+}
+```
+
+## 8. 후순위 확장 방향
 
 | 확장 | MVP 이후 추가 이유 |
 |---|---|

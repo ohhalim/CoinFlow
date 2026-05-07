@@ -50,7 +50,10 @@ MVP에서는 실시간 시세, 입출금, 복잡한 권한 모델, 분산 인프
 - 인증이 필요한 API는 JWT에서 현재 사용자 ID를 꺼내 사용한다.
 - 주문 생성, 주문 취소, 주문 조회, 지갑 조회, 원장 조회, fill 조회는 로그인 사용자 기준으로 처리한다.
 - 계정별 주문, 지갑, 체결 fill, 원장은 현재 사용자 ID 기준으로 반드시 분리한다.
-- 입출금은 구현하지 않고, 테스트용 seed wallet balance를 사용한다.
+- 입출금은 구현하지 않는다.
+- 회원가입 시 ACTIVE 상태인 모든 asset에 대해 잔액 0의 wallet을 자동 생성한다.
+- 테스트용 seed 사용자는 SEED_DEPOSIT 원장으로 초기 잔액을 부여한다.
+- 일반 가입 사용자는 잔액 0으로 시작하며, 잔액 없이 주문할 수 없다.
 - MVP에서는 지정가 주문만 지원한다.
 - MVP에서는 `GTC` 주문만 지원한다.
 - 수수료와 dust 처리는 제외한다.
@@ -134,7 +137,7 @@ MVP에서는 실시간 시세, 입출금, 복잡한 권한 모델, 분산 인프
 | 시장가 주문 | 제외 |
 | 주문 취소 | `OPEN`, `PARTIALLY_FILLED`만 가능 |
 | 체결 가격 | maker 주문 가격 |
-| 자기 체결 | MVP에서는 거절 |
+| 자기 체결 | 오더북에서 가격이 교차되는 후보 전체를 확인하여 그 중 userId == currentUserId인 주문이 하나라도 있으면 taker order 전체 거절. 실제 체결 여부와 무관하게 거절한다. 주문/지갑/원장/trade 변경 없음 |
 | client order id | 사용자별 중복 방지에 사용 |
 
 ### 주문 상태
@@ -150,17 +153,17 @@ MVP에서는 실시간 시세, 입출금, 복잡한 권한 모델, 분산 인프
 
 | 주문 | 잠금 자산 | 잠금 수량 |
 |---|---|---|
-| `BUY` | quote asset | `price * quantity` |
+| `BUY` | quote asset | `price * quantity`를 market의 `amount_scale` 기준으로 CEILING rounding |
 | `SELL` | base asset | `quantity` |
 
 ### 정산 정책
 
 | 대상 | 처리 |
 |---|---|
-| 매수자 quote wallet | 체결 수량에 해당하는 예약 금액을 locked에서 차감하고, maker 가격 기준 차액은 available로 환불 |
+| 매수자 quote wallet | 남은 주문 수량 기준으로 locked를 재계산하고, 해제 금액 중 체결 확정 금액을 제외한 차액은 available로 환불 |
 | 매수자 base wallet | 체결 수량만큼 available 증가 |
 | 매도자 base wallet | 체결 수량만큼 locked 감소 |
-| 매도자 quote wallet | 체결 금액만큼 available 증가 |
+| 매도자 quote wallet | 체결 확정 금액만큼 available 증가 |
 
 ### 매칭 정책
 
@@ -275,10 +278,14 @@ executed_quantity >= 0
 ### 체결 금액 불변식
 
 ```text
-trade.quote_amount = trade.price * trade.quantity
+trade.quote_amount = DOWN(trade.price * trade.quantity, market.amount_scale)
 ```
 
-단, 실제 저장값은 market의 scale/rounding 정책을 적용한 확정 금액이다.
+rounding 후 `trade.quote_amount`가 0이 되는 체결은 만들지 않는다.
+
+매칭 중 특정 후보와의 체결 결과가 zero-quote가 되면 해당 시점에서 매칭을 중단한다. 이미 체결된 부분이 있으면 taker 주문을 `PARTIALLY_FILLED`로, 없으면 `OPEN`으로 오더북에 등록한다. zero-quote를 유발한 maker 후보는 오더북에서 제거하지 않는다.
+
+체결 후 maker의 남은 수량이 dust가 되어 `DOWN(maker_price × maker_remaining, amount_scale) == 0`이면 해당 maker를 `CANCELED` 처리하고 잔여 locked를 해제한다. 원장에 `ORDER_CANCEL_RELEASE`를 기록한다.
 
 ### 오더북 불변식
 
