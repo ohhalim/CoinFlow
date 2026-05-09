@@ -10,15 +10,15 @@ public record SignupResponse(
         String email,
         String nickname,
         UserStatus status,
-        LocalDateTime createAt
+        LocalDateTime createdAt
 ) {
-    public static SignupResponse fron(User user) {
+    public static SignupResponse from(User user) {
         return new SignupResponse(
                 user.getId(),
                 user.getEmail(),
                 user.getNickname(),
                 user.getStatus(),
                 user.getCreatedAt()
-        );   
+        );
     }
 }
