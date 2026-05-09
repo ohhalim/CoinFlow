@@ -32,6 +32,17 @@ public class User {
         user.email = email;
         user.passwordHash = passwordHash;
         user.nickname = nickname;
-        return user;                        
+        user.status = UserStatus.ACTIVE;
+        return user;
+    }
+    @PrePersist
+    public void prePersist() {
+        LocalDateTime now = LocalDateTime.now();
+        this.createdAt = now;
+        this.updatedAt = now;
+    }
+    @PreUpdate
+    public void preUpdate() {
+        this.updatedAt = LocalDateTime.now();
     }
 }
