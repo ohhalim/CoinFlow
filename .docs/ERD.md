@@ -7,12 +7,15 @@
 ## 설계 기준
 
 - 외부 API는 `market_symbol` 예: `BTC-KRW`를 사용하고, 내부 FK는 `market_id`를 사용한다.
-- `assets`는 자산별 표시명, 최소 단위, 상태의 기준이다.
+- `assets`는 자산 코드, 표시명, 상태의 기준이다. 주문 검증 단위와 최소 주문 정책은 `markets`에서 관리한다.
 - 동일 시장 내 시간 우선순위는 `orders.sequence`로 보장한다.
 - `wallets`는 현재 잔액 스냅샷이고, `wallet_ledgers`는 append-only 변동 이력이다.
 - 매수 주문은 quote asset을 잠그고, 매도 주문은 base asset을 잠근다.
 - 체결 가격은 maker 주문 가격을 따른다.
 - `trades.quote_amount`와 `orders.executed_quote_amount`는 체결 당시 확정된 quote 금액을 저장한다.
+- `quote_amount`는 `price * quantity`를 `markets.amount_scale` 기준으로 DOWN rounding하여 확정한다.
+- BUY 주문의 `locked_amount`는 `price * remaining_quantity`를 `markets.amount_scale` 기준으로 CEILING rounding하여 계산한다.
+- 부분 체결 시 `locked_amount`는 단순 차감하지 않고 `price * new_remaining_quantity`로 재계산(CEILING)한다. `released_amount = old_locked - new_locked`, `buyer_refund = released_amount - trade_quote_amount`.
 - `domain_events`는 MVP에서는 이벤트 로그 겸 outbox 후보 테이블로 사용한다.
 
 ## 상태값 정책
@@ -78,31 +81,23 @@ CREATE TABLE users (
 );
 
 -- 2. assets
--- 자산별 표시명, 최소 단위, 상태 정책.
+-- 자산별 표시명과 상태 정책.
 -- 예: BTC, KRW, USD
 CREATE TABLE assets (
     code             VARCHAR(20)     NOT NULL,
     name             VARCHAR(100)    NOT NULL,
     display_name     VARCHAR(100)    NOT NULL,
-    asset_type       VARCHAR(20)     NOT NULL,
-    symbol           VARCHAR(20)     NULL,
-    precision_unit   DECIMAL(38, 18) NOT NULL,
-    min_size         DECIMAL(38, 18) NOT NULL,
     status           VARCHAR(20)     NOT NULL DEFAULT 'ACTIVE',
     created_at       DATETIME(6)     NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     updated_at       DATETIME(6)     NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
 
     PRIMARY KEY (code),
-    CONSTRAINT chk_assets_type CHECK (asset_type IN ('FIAT', 'CRYPTO')),
-    CONSTRAINT chk_assets_status CHECK (status IN ('ACTIVE', 'INACTIVE', 'SUSPENDED')),
-    CONSTRAINT chk_assets_units CHECK (
-        precision_unit > 0
-        AND min_size >= 0
-    )
+    CONSTRAINT chk_assets_status CHECK (status IN ('ACTIVE', 'INACTIVE', 'SUSPENDED'))
 );
 
 -- 3. markets
 -- price/quantity 검증 정책은 market에 둔다.
+-- amount_scale은 quote_amount 반올림 정책에 사용한다.
 -- 예: BTC-KRW, base_asset=BTC, quote_asset=KRW
 CREATE TABLE markets (
     id                  BIGINT          NOT NULL AUTO_INCREMENT,
@@ -111,8 +106,6 @@ CREATE TABLE markets (
     base_asset          VARCHAR(20)     NOT NULL,
     quote_asset         VARCHAR(20)     NOT NULL,
 
-    price_scale         INT             NOT NULL,
-    quantity_scale      INT             NOT NULL,
     amount_scale        INT             NOT NULL,
 
     tick_size           DECIMAL(38, 18) NOT NULL,
@@ -121,7 +114,6 @@ CREATE TABLE markets (
     min_order_amount    DECIMAL(38, 18) NOT NULL,
 
     status              VARCHAR(20)     NOT NULL DEFAULT 'ACTIVE',
-    status_message      VARCHAR(255)    NOT NULL DEFAULT '',
     cancel_only         BOOLEAN         NOT NULL DEFAULT FALSE,
     created_at          DATETIME(6)     NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     updated_at          DATETIME(6)     NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
@@ -131,11 +123,7 @@ CREATE TABLE markets (
     CONSTRAINT fk_markets_base_asset FOREIGN KEY (base_asset) REFERENCES assets (code),
     CONSTRAINT fk_markets_quote_asset FOREIGN KEY (quote_asset) REFERENCES assets (code),
     CONSTRAINT chk_markets_status CHECK (status IN ('ACTIVE', 'INACTIVE', 'SUSPENDED')),
-    CONSTRAINT chk_markets_scale CHECK (
-        price_scale >= 0
-        AND quantity_scale >= 0
-        AND amount_scale >= 0
-    ),
+    CONSTRAINT chk_markets_amount_scale CHECK (amount_scale >= 0),
     CONSTRAINT chk_markets_units CHECK (
         tick_size > 0
         AND step_size > 0
@@ -153,7 +141,6 @@ CREATE TABLE wallets (
     asset               VARCHAR(20)     NOT NULL,
     available_balance   DECIMAL(38, 18) NOT NULL DEFAULT 0,
     locked_balance      DECIMAL(38, 18) NOT NULL DEFAULT 0,
-    version             BIGINT          NOT NULL DEFAULT 0,
     created_at          DATETIME(6)     NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     updated_at          DATETIME(6)     NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
 
@@ -206,7 +193,6 @@ CREATE TABLE orders (
     created_at             DATETIME(6)     NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     updated_at             DATETIME(6)     NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
     closed_at              DATETIME(6)     NULL,
-    closed_reason          VARCHAR(30)     NULL,
 
     PRIMARY KEY (id),
     UNIQUE KEY uq_orders_user_client_order (user_id, client_order_id),
@@ -220,7 +206,6 @@ CREATE TABLE orders (
     CONSTRAINT chk_orders_type CHECK (type IN ('LIMIT')),
     CONSTRAINT chk_orders_time_in_force CHECK (time_in_force IN ('GTC')),
     CONSTRAINT chk_orders_status CHECK (status IN ('OPEN', 'PARTIALLY_FILLED', 'FILLED', 'CANCELED')),
-    CONSTRAINT chk_orders_closed_reason CHECK (closed_reason IS NULL OR closed_reason IN ('FILLED', 'CANCELED')),
     CONSTRAINT chk_orders_amounts CHECK (
         price > 0
         AND original_quantity > 0
@@ -282,12 +267,21 @@ CREATE TABLE trades (
     INDEX idx_trades_buy_order (buy_order_id),
     INDEX idx_trades_sell_order (sell_order_id),
     INDEX idx_trades_maker_order (maker_order_id),
-    INDEX idx_trades_taker_order (taker_order_id)
+    INDEX idx_trades_taker_order (taker_order_id),
+
+    -- 사용자 fill 조회: GET /api/v1/fills
+    INDEX idx_trades_buy_user_traded (buy_user_id, traded_at),
+    INDEX idx_trades_sell_user_traded (sell_user_id, traded_at)
 );
 
 -- 8. wallet_ledgers
 -- append-only 원장.
 -- available/locked의 변화량과 변화 후 스냅샷을 같이 저장한다.
+-- reference_type/reference_id는 제거. order_id, trade_id FK로만 참조 무결성 보장.
+-- API에서 referenceType이 필요하면 아래 규칙으로 파생한다:
+--   trade_id IS NOT NULL → TRADE / trade_id
+--   order_id IS NOT NULL → ORDER / order_id
+--   둘 다 NULL           → SYSTEM / null
 CREATE TABLE wallet_ledgers (
     id                       BIGINT          NOT NULL AUTO_INCREMENT,
 
@@ -301,11 +295,8 @@ CREATE TABLE wallet_ledgers (
     available_balance_after  DECIMAL(38, 18) NOT NULL,
     locked_balance_after     DECIMAL(38, 18) NOT NULL,
 
-    reference_type           VARCHAR(30)     NOT NULL,
-    reference_id             BIGINT          NULL,
     order_id                 BIGINT          NULL,
     trade_id                 BIGINT          NULL,
-    description              VARCHAR(255)    NULL,
 
     created_at               DATETIME(6)     NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
 
@@ -324,15 +315,14 @@ CREATE TABLE wallet_ledgers (
         'TRADE_SELL_BASE_SETTLE',
         'TRADE_SELL_QUOTE_CREDIT'
     )),
-    CONSTRAINT chk_wallet_ledgers_reference_type CHECK (reference_type IN ('SYSTEM', 'ORDER', 'TRADE')),
     CONSTRAINT chk_wallet_ledgers_after_balance CHECK (
         available_balance_after >= 0
         AND locked_balance_after >= 0
     ),
 
     INDEX idx_wallet_ledgers_user_created (user_id, created_at),
+    INDEX idx_wallet_ledgers_user_asset_created (user_id, asset, created_at),
     INDEX idx_wallet_ledgers_wallet_created (wallet_id, created_at),
-    INDEX idx_wallet_ledgers_reference (reference_type, reference_id),
     INDEX idx_wallet_ledgers_order (order_id),
     INDEX idx_wallet_ledgers_trade (trade_id)
 );
@@ -376,28 +366,6 @@ CREATE TABLE domain_events (
     INDEX idx_domain_events_published_created (published, created_at)
 );
 
--- 10. idempotency_requests
--- client_order_id는 주문 생성 중복 방지에 사용한다.
--- 이 테이블은 주문 취소 등 command 단위 멱등성까지 확장하기 위한 선택적 기반이다.
-CREATE TABLE idempotency_requests (
-    id                 BIGINT       NOT NULL AUTO_INCREMENT,
-    user_id            BIGINT       NOT NULL,
-    command_type       VARCHAR(40)  NOT NULL,
-    request_key        VARCHAR(100) NOT NULL,
-    request_hash       VARCHAR(128) NOT NULL,
-    status             VARCHAR(20)  NOT NULL,
-    response_snapshot  TEXT         NULL,
-    created_at         DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    updated_at         DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
-
-    PRIMARY KEY (id),
-    UNIQUE KEY uq_idempotency_user_command_key (user_id, command_type, request_key),
-    CONSTRAINT fk_idempotency_user FOREIGN KEY (user_id) REFERENCES users (id),
-    CONSTRAINT chk_idempotency_command_type CHECK (command_type IN ('PLACE_ORDER', 'CANCEL_ORDER')),
-    CONSTRAINT chk_idempotency_status CHECK (status IN ('PROCESSING', 'SUCCEEDED', 'FAILED')),
-
-    INDEX idx_idempotency_user_created (user_id, created_at)
-);
 ```
 
 ## 테이블별 역할 요약
@@ -405,7 +373,7 @@ CREATE TABLE idempotency_requests (
 | 테이블 | 역할 |
 |---|---|
 | `users` | 회원가입/로그인 사용자와 FK 기준 |
-| `assets` | 자산 표시명, 최소 단위, 상태 정책 |
+| `assets` | 자산 표시명과 상태 정책 |
 | `markets` | 마켓 정보와 주문 검증 정책 |
 | `wallets` | 사용자별 자산 현재 잔액 |
 | `order_sequences` | 시장별 주문 우선순위 sequence |
@@ -413,7 +381,6 @@ CREATE TABLE idempotency_requests (
 | `trades` | 체결 기록 |
 | `wallet_ledgers` | 지갑 변동 append-only 원장 |
 | `domain_events` | 주요 도메인 이벤트 로그 / outbox 후보 |
-| `idempotency_requests` | command 멱등성 확장 기반 |
 
 ## 구현 시 주의사항
 

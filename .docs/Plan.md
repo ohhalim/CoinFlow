@@ -91,7 +91,7 @@ MVP에서 DB가 정합성의 기준이다.
 | 테이블 | 역할 |
 |---|---|
 | `users` | 회원가입/로그인 사용자 |
-| `assets` | 자산 정보 |
+| `assets` | 자산 표시명과 상태 정책 |
 | `markets` | 시장과 주문 검증 정책 |
 | `wallets` | 사용자별 자산 현재 스냅샷 |
 | `wallet_ledgers` | 모든 지갑 변동 이력 |
@@ -99,7 +99,6 @@ MVP에서 DB가 정합성의 기준이다.
 | `orders` | 주문 상태와 수량 |
 | `trades` | 체결 기록 |
 | `domain_events` | 내부 이벤트 로그 |
-| `idempotency_requests` | API 멱등성 확장용 예약 테이블 |
 
 ### 4.2 메모리 오더북은 파생 조회 모델
 
@@ -115,10 +114,16 @@ MVP에서 DB가 정합성의 기준이다.
 
 MVP 구현 선택지:
 
-- 1차 단순 구현: 단일 lock으로 주문 처리 직렬화
-- 이후 개선: market 단위 queue/worker
+- 1차 단순 구현: 시장별 `ReentrantLock`으로 직렬화. 전역 lock이 아니라 market id 기준으로 lock 인스턴스를 관리한다 (`ConcurrentHashMap<Long, ReentrantLock>`). 같은 시장의 주문만 직렬화되고 다른 시장 간 블로킹은 없다.
+- 이후 개선: market 단위 queue/worker로 전환
 
 처음 구현에서는 성능보다 정합성을 우선한다.
+
+시장 lock의 범위는 트랜잭션 시작부터 commit 이후 메모리 오더북 반영 완료까지다. 트랜잭션 commit 직후 오더북 갱신 전에 다음 주문이 진입하면 stale 오더북으로 매칭이 발생할 수 있다.
+
+구현은 `TransactionTemplate`을 사용해 DB 트랜잭션 완료 후 메모리 오더북을 반영한다. 트랜잭션 내부에서는 오더북을 직접 변경하지 않고, commit 이후 적용할 변경 사항만 결과 객체로 반환한다.
+
+commit 이후 오더북 반영 중 예외가 발생하면 해당 market의 오더북을 DB에서 재빌드한다. 재빌드도 실패하면 해당 market을 `cancel_only = true`로 전환하고 수동 복구를 기다린다. 어느 경우에도 이미 commit된 DB 데이터는 변경하지 않는다.
 
 ### 4.4 원장은 append-only
 
@@ -132,10 +137,10 @@ MVP 구현 선택지:
 | `delta_locked` | locked 변화량 |
 | `available_balance_after` | 변경 후 available |
 | `locked_balance_after` | 변경 후 locked |
-| `reference_type` | `SYSTEM`, `ORDER`, `TRADE` |
-| `reference_id` | 참조 ID |
 | `order_id` | 관련 주문 ID |
 | `trade_id` | 관련 체결 ID |
+
+`reference_type`, `reference_id`는 DB에 저장하지 않는다. API 응답에서 참조 타입이 필요하면 `order_id`, `trade_id` 기준으로 파생한다.
 
 ---
 
@@ -150,13 +155,14 @@ id, email, password_hash, nickname, status
 ### Asset
 
 ```text
-code, name, display_name, asset_type, precision_unit, min_size, status
+code, name, display_name, status
 ```
 
 ### Market
 
 ```text
-symbol, base_asset, quote_asset,
+symbol, display_name, base_asset, quote_asset,
+amount_scale,
 tick_size, step_size, min_order_quantity, min_order_amount,
 status, cancel_only
 ```
@@ -164,7 +170,7 @@ status, cancel_only
 ### Wallet
 
 ```text
-user_id, asset, available_balance, locked_balance, version
+user_id, asset, available_balance, locked_balance
 unique(user_id, asset)
 ```
 
@@ -194,7 +200,7 @@ price, quantity, quote_amount
 user_id, wallet_id, asset, type,
 delta_available, delta_locked,
 available_balance_after, locked_balance_after,
-reference_type, reference_id, order_id, trade_id
+order_id, trade_id
 ```
 
 ---
@@ -214,15 +220,18 @@ locked_balance >= 0
 original_quantity = executed_quantity + remaining_quantity
 remaining_quantity >= 0
 executed_quantity >= 0
+locked_amount = 0  (status = FILLED 또는 CANCELED)
 ```
 
-취소된 주문도 위 수량 불변식은 유지한다. `CANCELED` 주문의 `remaining_quantity`는 취소된 잔여 수량이다.
+취소된 주문도 위 수량 불변식은 유지한다. `CANCELED` 주문의 `remaining_quantity`는 취소된 잔여 수량이다. `FILLED` 또는 `CANCELED` 상태가 되면 `locked_amount`는 반드시 0이어야 한다.
 
 ### Trade
 
 ```text
-quote_amount = price * quantity
+quote_amount = price * quantity 를 markets.amount_scale 기준으로 DOWN rounding
 ```
+
+BUY 주문의 `locked_amount`는 `price * remaining_quantity`를 `markets.amount_scale` 기준으로 CEILING rounding하여 계산한다. 부분 체결 후에는 기존 잠금액을 단순 차감하지 않고 남은 수량 기준으로 재계산한다.
 
 ### OrderBook
 
@@ -238,41 +247,49 @@ quote_amount = price * quantity
 ### 7.1 주문 생성
 
 ```text
-1. JWT에서 currentUserId 추출
-2. market 조회
-3. market status 검증
-4. side/type/timeInForce 검증
-5. price tickSize 검증
-6. quantity stepSize 검증
-7. minOrderQuantity / minOrderAmount 검증
-8. clientOrderId 중복 검증
-9. order sequence 발급
-10. wallet row lock
-11. 자산 lock
-12. order 저장
-13. 메모리 오더북 후보 기준 매칭 계획 생성
-14. maker order row lock 및 상태 재검증
-15. trade 저장
-16. order 수량/상태 갱신
-17. wallet 정산
-18. wallet ledger 기록
-19. domain event 기록
-20. commit 이후 메모리 오더북 변경
+1.  JWT에서 currentUserId 추출
+2.  market 조회
+3.  market status 검증
+4.  side/type/timeInForce 검증
+5.  price tickSize 검증
+6.  quantity stepSize 검증
+7.  minOrderQuantity / minOrderAmount 검증
+8.  clientOrderId 중복 검증
+9.  order sequence 발급
+10. 메모리 오더북 후보 기준 매칭 후보 목록 생성
+11. 자기 체결 사전 검증 (교차 가능한 후보 중 userId == currentUserId인 주문이 하나라도 있으면 SELF_TRADE_NOT_ALLOWED 반환, 이후 단계 진행 없음)
+12. maker order row lock 및 상태/수량 재검증
+13. 체결에 관련된 모든 wallet 확정 (taker wallet + 확정된 maker들의 wallet)
+14. wallet row lock — (user_id, asset) 오름차순으로 정렬 후 일괄 SELECT FOR UPDATE
+15. taker 잔액 재검증 (lock 후 확인)
+16. taker 자산 lock (available → locked)
+17. order 저장
+18. trade 저장
+19. order 수량/상태 갱신 (FILLED 또는 CANCELED 시 closed_at = now(), lockedAmount = 0)
+20. wallet 정산
+21. wallet ledger 기록
+22. domain event 기록
+23. commit 이후 메모리 오더북 변경
 ```
 
 ### 7.2 주문 취소
 
+취소도 주문 생성과 동일하게 market lock 범위 안에서 처리한다. orderId로 market을 식별한 뒤 market lock을 획득하고, 트랜잭션 완료 후 오더북에서 제거한 뒤 lock을 해제한다.
+
 ```text
-1. JWT에서 currentUserId 추출
-2. order row lock
-3. 주문 소유자 검증
-4. 주문 상태 검증
-5. wallet row lock
-6. remainingQuantity 기준 잔여 locked 해제
-7. order 상태 CANCELED 변경
-8. wallet ledger 기록
-9. domain event 기록
-10. commit 이후 메모리 오더북에서 제거
+1.  JWT에서 currentUserId 추출
+2.  order 조회로 market_id 확인
+3.  market lock 획득
+4.  order row lock (SELECT FOR UPDATE)
+5.  주문 소유자 검증
+6.  주문 상태 검증 (OPEN, PARTIALLY_FILLED만 취소 가능)
+7.  wallet row lock (lockedAsset wallet을 (user_id, asset) 오름차순으로 잠금)
+8.  remainingQuantity 기준 잔여 locked 해제 (locked → available)
+9.  order 상태 CANCELED 변경, lockedAmount = 0, closed_at = now()
+10. wallet ledger 기록
+11. domain event 기록
+12. commit 이후 메모리 오더북에서 제거
+13. market lock 해제
 ```
 
 ### 7.3 서버 시작 시 오더북 초기화
@@ -310,7 +327,8 @@ quote_amount = price * quantity
 
 - Security/JWT 의존성 추가
 - Flyway V1 migration 작성
-- `users`, `assets`, `markets`, `wallets` seed 작성
+- `users`, `assets`, `markets`, `wallets`, `order_sequences` seed 작성
+  - `order_sequences`: seed market마다 `(market_id, last_sequence=0)` row를 미리 삽입한다. sequence row가 없으면 첫 주문에서 `SELECT FOR UPDATE` 실패로 에러가 발생한다.
 - 회원가입 API
 - 로그인 API
 - 현재 사용자 조회 API
@@ -318,6 +336,7 @@ quote_amount = price * quantity
 완료 기준:
 
 - 회원가입 시 password hash 저장
+- 회원가입 시 ACTIVE 상태인 모든 asset에 대해 available=0, locked=0 wallet이 생성된다 (signup 트랜잭션 안에서 원자적으로 처리)
 - 로그인 시 JWT access token 발급
 - JWT로 `/api/v1/users/me` 조회 가능
 - seed market과 seed wallet 확인 가능
@@ -430,7 +449,7 @@ quote_amount = price * quantity
 
 1차 MVP에서는 `orders.user_id + client_order_id` unique constraint로 주문 중복을 방지한다.
 
-`idempotency_requests`는 API command 단위 멱등성 확장을 위한 예약 테이블이다. 1차 구현 필수 대상이 아니다.
+주문 취소 등 다른 command의 멱등성이 필요해지면 그때 별도 테이블을 추가한다.
 
 ### Event Outbox
 

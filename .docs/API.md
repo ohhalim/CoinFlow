@@ -63,6 +63,7 @@ Authorization: Bearer {accessToken}
 | `INVALID_CREDENTIALS` | 로그인 정보 불일치 |
 | `MARKET_NOT_FOUND` | 시장을 찾을 수 없음 |
 | `MARKET_NOT_ACTIVE` | 거래 불가능한 시장 |
+| `MARKET_CANCEL_ONLY` | 취소 전용 시장 (신규 주문 거절) |
 | `INVALID_ORDER_TYPE` | 지원하지 않는 주문 유형 |
 | `INVALID_ORDER_SIDE` | 지원하지 않는 주문 방향 |
 | `INVALID_PRICE` | 유효하지 않은 가격 |
@@ -76,6 +77,34 @@ Authorization: Bearer {accessToken}
 | `ORDER_NOT_CANCELABLE` | 취소 불가능한 주문 |
 | `SELF_TRADE_NOT_ALLOWED` | 자기 체결 거절 |
 | `DUPLICATE_CLIENT_ORDER_ID` | 중복 client order id |
+
+### 에러 코드 상황별 매핑
+
+| 상황 | 에러 코드 |
+|---|---|
+| request body 형식 오류, 필수 필드 누락 | `INVALID_REQUEST` |
+| Authorization 헤더 없음 또는 JWT 유효하지 않음 | `UNAUTHORIZED` |
+| JWT subject의 user id가 DB에 없음 | `USER_NOT_FOUND` |
+| 회원가입 시 이미 사용 중인 email | `DUPLICATE_EMAIL` |
+| 로그인 시 email 없음 또는 password 불일치 | `INVALID_CREDENTIALS` |
+| 존재하지 않는 market symbol | `MARKET_NOT_FOUND` |
+| market status가 `INACTIVE` 또는 `SUSPENDED`인 시장에 주문 생성 | `MARKET_NOT_ACTIVE` |
+| market `cancel_only=true`인 시장에 신규 주문 생성 | `MARKET_CANCEL_ONLY` |
+| `type`이 `LIMIT`이 아닌 주문 | `INVALID_ORDER_TYPE` |
+| `side`가 `BUY` 또는 `SELL`이 아닌 주문 | `INVALID_ORDER_SIDE` |
+| `price <= 0` 또는 `null` | `INVALID_PRICE` |
+| `quantity <= 0` 또는 `null` | `INVALID_QUANTITY` |
+| price가 market `tick_size`의 배수가 아님 | `INVALID_TICK_SIZE` |
+| quantity가 market `step_size`의 배수가 아님 | `INVALID_STEP_SIZE` |
+| quantity < market `min_order_quantity` | `MIN_ORDER_QUANTITY_NOT_MET` |
+| price × quantity < market `min_order_amount` | `MIN_ORDER_AMOUNT_NOT_MET` |
+| taker 잔액 재검증 실패 (wallet row lock 이후) | `INSUFFICIENT_BALANCE` |
+| 존재하지 않는 orderId 조회/취소 또는 타인 주문 접근 | `ORDER_NOT_FOUND` |
+| `FILLED` 또는 `CANCELED` 주문 취소 시도 | `ORDER_NOT_CANCELABLE` |
+| 자기 체결 후보가 하나라도 있는 taker 주문 | `SELF_TRADE_NOT_ALLOWED` |
+| 동일 사용자가 같은 `clientOrderId`로 두 번째 주문 | `DUPLICATE_CLIENT_ORDER_ID` |
+
+> 타인 주문을 조회/취소하려 할 때 `ORDER_ACCESS_DENIED` 대신 `ORDER_NOT_FOUND`를 반환한다. 주문 존재 여부를 노출하지 않기 위한 의도적인 정책이다.
 
 ## 2. 도메인 처리 규칙
 
@@ -117,12 +146,30 @@ SELF_TRADE_NOT_ALLOWED
 
 | 주문 | lockedAsset | lockedAmount |
 |---|---|---|
-| `BUY` | quote asset | `price * remainingQuantity` |
+| `BUY` | quote asset | `price * remainingQuantity`를 market의 `amountScale` 기준으로 CEILING rounding |
 | `SELL` | base asset | `remainingQuantity` |
 
 예를 들어 `BTC-KRW` 시장에서 `BUY price=10000, quantity=0.5` 주문을 생성하면 최초 잠금은 `KRW 5000`이다.
 
 이후 `0.2 BTC`가 체결되어 `remainingQuantity=0.3`이 되면 남은 잠금은 `KRW 3000`이다.
+
+BUY 주문은 실제 필요 금액보다 적게 잠기지 않도록 CEILING rounding을 사용한다. 부분 체결 후에는 기존 `lockedAmount`를 단순 차감하지 않고 `price * newRemainingQuantity` 기준으로 다시 계산한다.
+
+`FILLED` 또는 `CANCELED` 상태가 되면 `lockedAmount = 0`이다.
+
+> **용어 구분**: `wallet.locked`(지갑 조회 응답)는 해당 사용자-자산의 전체 잠금 합산이다. `order.lockedAmount`(주문 응답)는 해당 주문 하나에 귀속된 잔여 잠금이다. 두 필드는 합산 관계이지 같은 값이 아니다. 예를 들어 BUY 주문 2건이 각각 KRW 5000, KRW 3000을 잠갔다면 `wallet.locked = 8000`, 각 주문의 `lockedAmount = 5000`, `3000`이다.
+
+### 2.3 cancel_only 정책
+
+`markets.cancel_only = true`인 시장은 신규 주문 생성을 거절한다. 취소 요청은 허용된다.
+
+| market.status | cancel_only | 신규 주문 | 취소 |
+|---|---|---|---|
+| `ACTIVE` | `false` | 허용 | 허용 |
+| `ACTIVE` | `true` | `MARKET_CANCEL_ONLY` 반환 | 허용 |
+| `INACTIVE` / `SUSPENDED` | - | `MARKET_NOT_ACTIVE` 반환 | 허용 |
+
+`INACTIVE`, `SUSPENDED` 시장에서도 기존 주문 취소는 허용한다. 취소를 막으면 locked 자산이 해제되지 않아 사용자 자산이 묶이기 때문이다.
 
 ### 2.3 체결/정산 규칙
 
@@ -131,9 +178,14 @@ SELF_TRADE_NOT_ALLOWED
 BUY 주문이 체결되면:
 
 ```text
+trade_quote_amount:
+  trade price * fill quantity를 market의 amountScale 기준으로 DOWN rounding
+
 buyer quote wallet:
-  locked 감소 = buyer order price * fill quantity
-  available 증가 = (buyer order price - trade price) * fill quantity
+  new_locked = buyer order price * new remaining quantity를 amountScale 기준으로 CEILING rounding
+  released_amount = old_locked - new_locked
+  locked 감소 = released_amount
+  available 증가 = released_amount - trade_quote_amount
 
 buyer base wallet:
   available 증가 = fill quantity
@@ -146,36 +198,40 @@ seller base wallet:
   locked 감소 = fill quantity
 
 seller quote wallet:
-  available 증가 = trade price * fill quantity
+  available 증가 = trade_quote_amount
 ```
 
 MVP에서는 수수료를 적용하지 않는다.
+rounding 후 `trade_quote_amount`가 0이 되는 체결은 만들지 않는다.
 
 ### 2.4 주문 생성 트랜잭션 흐름
 
 주문 생성은 아래 처리를 하나의 트랜잭션 경계 안에서 수행한다.
 
 ```text
-1. JWT에서 currentUserId 추출
-2. market 조회
-3. market status 검증
-4. side/type/timeInForce 검증
-5. price tickSize 검증
-6. quantity stepSize 검증
-7. minOrderQuantity / minOrderAmount 검증
-8. clientOrderId 중복 검증
-9. order sequence 발급
-10. wallet row lock
-11. 자산 lock
-12. order 저장
-13. 메모리 오더북 후보 기준 매칭 계획 생성
-14. maker order row lock 및 상태 재검증
-15. trade 저장
-16. order 수량/상태 갱신
-17. wallet 정산
-18. wallet ledger 기록
-19. domain event 기록
-20. commit 이후 메모리 오더북 변경
+1.  JWT에서 currentUserId 추출
+2.  market 조회
+3.  market status 검증 / cancel_only=true이면 MARKET_CANCEL_ONLY 반환
+4.  side/type/timeInForce 검증
+5.  price tickSize 검증
+6.  quantity stepSize 검증
+7.  minOrderQuantity / minOrderAmount 검증
+8.  clientOrderId 중복 검증
+9.  order sequence 발급
+10. 메모리 오더북 후보 기준 매칭 후보 목록 생성
+11. 자기 체결 사전 검증 (교차 가능한 후보 중 userId == currentUserId인 주문이 하나라도 있으면 SELF_TRADE_NOT_ALLOWED 반환, 이후 단계 진행 없음)
+12. maker order row lock 및 상태/수량 재검증
+13. 체결에 관련된 모든 wallet 확정 (taker wallet + 확정된 maker들의 wallet)
+14. wallet row lock — (user_id, asset) 오름차순으로 정렬 후 일괄 SELECT FOR UPDATE
+15. taker 잔액 재검증 (lock 후 확인, 부족 시 INSUFFICIENT_BALANCE 반환)
+16. taker 자산 lock (available → locked)
+17. order 저장
+18. trade 저장
+19. order 수량/상태 갱신 (완전 체결 시 lockedAmount = 0)
+20. wallet 정산
+21. wallet ledger 기록
+22. domain event 기록
+23. commit 이후 메모리 오더북 변경 (시장 lock 범위 안에서 완료)
 ```
 
 ### 2.5 주문 취소 트랜잭션 흐름
@@ -185,12 +241,12 @@ MVP에서는 수수료를 적용하지 않는다.
 2. order row lock
 3. 주문 소유자 검증
 4. 주문 상태 검증
-5. wallet row lock
+5. wallet row lock (lockedAsset wallet을 (user_id, asset) 오름차순으로 잠금)
 6. remainingQuantity 기준 잔여 locked 해제
-7. order 상태 CANCELED 변경
+7. order 상태 CANCELED 변경 및 lockedAmount = 0
 8. wallet ledger 기록
 9. domain event 기록
-10. commit 이후 메모리 오더북에서 제거
+10. commit 이후 메모리 오더북에서 제거 (시장 lock 범위 안에서 완료)
 ```
 
 ### 2.6 메모리 오더북 초기화
@@ -316,6 +372,7 @@ Response:
     "displayName": "BTC/KRW",
     "baseAsset": "BTC",
     "quoteAsset": "KRW",
+    "amountScale": 0,
     "tickSize": "1",
     "stepSize": "0.00000001",
     "minOrderQuantity": "0.0001",
@@ -389,6 +446,8 @@ Response:
 ]
 ```
 
+`referenceType`, `referenceId`는 DB 저장 컬럼이 아니라 응답 파생 필드다. `tradeId`가 있으면 `TRADE`, `orderId`만 있으면 `ORDER`, 둘 다 없으면 `SYSTEM`으로 계산한다.
+
 ## 6. Orders
 
 ### 6.1 주문 생성
@@ -453,6 +512,7 @@ Response:
 - `lockedAmount`는 현재 주문 잔량에 대해 남아 있는 잠금 수량/금액이다.
 - 주문 생성 성공은 matching/settlement 처리 후 확정된 상태를 반환한다.
 - 체결이 발생하지 않으면 `trades`는 빈 배열이다.
+- `clientOrderId`는 optional이다. 값이 있으면 동일 사용자 내 중복을 거절한다(`DUPLICATE_CLIENT_ORDER_ID`). 값이 없으면 멱등성을 보장하지 않으며, null 주문 여러 건을 허용한다.
 
 ### 6.2 주문 취소
 
@@ -484,6 +544,20 @@ Response:
 - 취소 시 잔여 수량에 해당하는 locked asset을 available로 되돌린다.
 - `releasedAmount`는 취소로 해제된 잔여 lock 수량/금액이다.
 
+`releasedAmount` 계산:
+
+```text
+releasedAsset  = order.lockedAsset
+releasedAmount = order.lockedAmount
+
+wallet.locked    -= releasedAmount
+wallet.available += releasedAmount
+order.lockedAmount = 0
+order.status       = CANCELED
+```
+
+BUY 주문은 부분 체결 시마다 `lockedAmount`를 `price * remainingQuantity` CEILING으로 재계산해 유지하므로, 취소 시 `price * remainingQuantity`를 다시 계산하지 않고 저장된 `order.lockedAmount`를 그대로 사용한다. SELL 주문도 동일하게 `lockedAmount == remainingQuantity`이므로 같은 방식으로 처리한다.
+
 ### 6.3 주문 단건 조회
 
 ```http
@@ -511,8 +585,7 @@ Response:
   "lockedAmount": "3000",
   "status": "PARTIALLY_FILLED",
   "createdAt": "2026-04-30T12:31:10.123",
-  "closedAt": null,
-  "closedReason": null
+  "closedAt": null
 }
 ```
 
@@ -664,3 +737,4 @@ Response:
 - 요청 사용자의 주문이 `maker_order_id`와 같으면 `liquidity=M`이다.
 - 요청 사용자의 주문이 `taker_order_id`와 같으면 `liquidity=T`이다.
 - 주문/체결/정산이 같은 트랜잭션에서 완료되므로 `settled=true`로 응답한다.
+- `orderId` 필터 사용 시: 해당 주문이 존재하지 않거나 현재 사용자의 주문이 아니면 `ORDER_NOT_FOUND`를 반환한다. 본인 주문이지만 fill이 없으면 빈 배열을 반환한다.
