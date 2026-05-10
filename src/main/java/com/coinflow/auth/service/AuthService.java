@@ -6,11 +6,11 @@ import com.coinflow.auth.dto.SignupRequest;
 import com.coinflow.auth.dto.SignupResponse;
 import com.coinflow.auth.dto.TokenResponse;
 import com.coinflow.auth.repository.UserRepository;
-import org.springframework.http.HttpStatus;
+import com.coinflow.common.exception.ApiException;
+import com.coinflow.common.exception.ErrorCode;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.web.server.ResponseStatusException;
 
 @Service
 public class AuthService {
@@ -32,7 +32,7 @@ public class AuthService {
     @Transactional
     public SignupResponse signup(SignupRequest request) {
         if (userRepository.existsByEmail(request.email())) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "Duplicate email");
+            throw new ApiException(ErrorCode.DUPLICATE_EMAIL);
         }
 
         String passwordHash = passwordEncoder.encode(request.password());
@@ -45,16 +45,20 @@ public class AuthService {
     @Transactional(readOnly = true)
     public TokenResponse login(LoginRequest request) {
         User user = userRepository.findByEmail(request.email())
-                .orElseThrow(() -> new ResponseStatusException(
-                        HttpStatus.UNAUTHORIZED,
-                        "Invalid credentials"
-                ));
+                .orElseThrow(() -> new ApiException(ErrorCode.INVALID_CREDENTIALS));
 
         if (!passwordEncoder.matches(request.password(), user.getPasswordHash())) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid credentials");
+            throw new ApiException(ErrorCode.INVALID_CREDENTIALS);
         }
 
         String accessToken = jwtService.generateAccessToken(user);
         return TokenResponse.of(accessToken, jwtService.getExpiresInSeconds(), user);
+    }
+
+    @Transactional(readOnly = true)
+    public SignupResponse getMe(Long userId) {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new ApiException(ErrorCode.USER_NOT_FOUND));
+        return SignupResponse.from(user);
     }
 }
