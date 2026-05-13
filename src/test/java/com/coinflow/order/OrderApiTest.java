@@ -1,9 +1,11 @@
 package com.coinflow.order;
 
 import com.coinflow.auth.repository.UserRepository;
+import com.coinflow.order.matching.MatchingEngine;
 import com.coinflow.support.TestcontainersConfig;
 import com.coinflow.wallet.domain.Wallet;
 import com.coinflow.wallet.repository.WalletRepository;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -24,6 +26,12 @@ class OrderApiTest {
     @Autowired private TestRestTemplate restTemplate;
     @Autowired private UserRepository userRepository;
     @Autowired private WalletRepository walletRepository;
+    @Autowired private MatchingEngine matchingEngine;
+
+    @BeforeEach
+    void setUp() {
+        matchingEngine.clearAll();
+    }
 
     // ── ORDER-001 주문 생성 ───────────────────────────────────────────
 
@@ -207,6 +215,83 @@ class OrderApiTest {
             var order = (Map<?, ?>) o;
             return "BTC-KRW".equals(order.get("market"));
         });
+    }
+
+    // ── ORDER-004 매칭 체결 ───────────────────────────────────────────
+
+    @Test
+    void BUY_SELL_전량_체결() {
+        String buyerToken = signupAndLogin("order013@example.com");
+        String sellerToken = signupAndLogin("order014@example.com");
+        depositKrw("order013@example.com", new BigDecimal("10000000"));
+        depositBtc("order014@example.com", new BigDecimal("0.001"));
+
+        // BUY 주문 먼저 등록 (오더북에 적재)
+        createOrder(buyerToken, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000", "0.0001", null);
+
+        // SELL 주문 → BUY와 체결
+        var sellResponse = createOrder(sellerToken, "BTC-KRW", "SELL", "LIMIT", "GTC", "100000000", "0.0001", null);
+
+        assertThat(sellResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(sellResponse.getBody().get("status")).isEqualTo("FILLED");
+
+        var trades = (java.util.List<?>) sellResponse.getBody().get("trades");
+        assertThat(trades).hasSize(1);
+        var trade = (Map<?, ?>) trades.get(0);
+        assertThat(trade.get("price")).isEqualTo("100000000");
+        assertThat(trade.get("quantity")).isEqualTo("0.0001");
+        assertThat(trade.get("liquidity")).isEqualTo("TAKER");
+
+        // buyer: KRW locked 소진, BTC 지급 확인
+        var buyer = userRepository.findByEmail("order013@example.com").orElseThrow();
+        var buyerKrw = findWallet(buyer.getId(), "KRW");
+        var buyerBtc = findWallet(buyer.getId(), "BTC");
+        assertThat(buyerKrw.getLockedBalance()).isEqualByComparingTo("0");
+        assertThat(buyerBtc.getAvailableBalance()).isEqualByComparingTo("0.0001");
+
+        // seller: BTC locked 소진, KRW 지급 확인
+        var seller = userRepository.findByEmail("order014@example.com").orElseThrow();
+        var sellerBtc = findWallet(seller.getId(), "BTC");
+        var sellerKrw = findWallet(seller.getId(), "KRW");
+        assertThat(sellerBtc.getLockedBalance()).isEqualByComparingTo("0");
+        assertThat(sellerKrw.getAvailableBalance()).isEqualByComparingTo("10000");
+    }
+
+    @Test
+    void BUY_SELL_부분_체결() {
+        String buyerToken = signupAndLogin("order015@example.com");
+        String sellerToken = signupAndLogin("order016@example.com");
+        depositKrw("order015@example.com", new BigDecimal("100000000"));
+        depositBtc("order016@example.com", new BigDecimal("0.001"));
+
+        // BUY 0.001 BTC 등록
+        createOrder(buyerToken, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000", "0.001", null);
+
+        // SELL 0.0001 BTC → 부분 체결
+        var sellResponse = createOrder(sellerToken, "BTC-KRW", "SELL", "LIMIT", "GTC", "100000000", "0.0001", null);
+
+        assertThat(sellResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(sellResponse.getBody().get("status")).isEqualTo("FILLED");
+
+        // buyer BTC 잔고 확인
+        var buyer = userRepository.findByEmail("order015@example.com").orElseThrow();
+        var buyerBtc = findWallet(buyer.getId(), "BTC");
+        assertThat(buyerBtc.getAvailableBalance()).isEqualByComparingTo("0.0001");
+    }
+
+    @Test
+    void 자기_자신_주문_매칭_불가() {
+        String token = signupAndLogin("order017@example.com");
+        depositKrw("order017@example.com", new BigDecimal("10000000"));
+        depositBtc("order017@example.com", new BigDecimal("0.001"));
+
+        createOrder(token, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000", "0.0001", null);
+        var sellResponse = createOrder(token, "BTC-KRW", "SELL", "LIMIT", "GTC", "100000000", "0.0001", null);
+
+        // self-trade 방지로 체결 안 됨 → SELL은 OPEN 상태
+        assertThat(sellResponse.getBody().get("status")).isEqualTo("OPEN");
+        var trades = (java.util.List<?>) sellResponse.getBody().get("trades");
+        assertThat(trades).isEmpty();
     }
 
     // ── helpers ───────────────────────────────────────────────────────
