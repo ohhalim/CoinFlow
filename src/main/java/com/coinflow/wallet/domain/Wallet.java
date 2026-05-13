@@ -35,6 +35,10 @@ public class Wallet {
         return wallet;
     }
 
+    public void deposit(BigDecimal amount) {
+        this.availableBalance = this.availableBalance.add(amount);
+    }
+
     public void lock(BigDecimal amount) {
         this.availableBalance = this.availableBalance.subtract(amount);
         this.lockedBalance = this.lockedBalance.add(amount);
