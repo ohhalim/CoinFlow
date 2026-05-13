@@ -84,6 +84,22 @@ public class    Order {
         return order;
     }
 
+    public boolean isCancelable() {
+        return status == OrderStatus.OPEN || status == OrderStatus.PARTIALLY_FILLED;
+    }
+
+    public BigDecimal releasableAmount() {
+        if (side == OrderSide.BUY) {
+            return lockedAmount.subtract(executedQuoteAmount);
+        }
+        return remainingQuantity;
+    }
+
+    public void cancel() {
+        this.status = OrderStatus.CANCELED;
+        this.closedAt = LocalDateTime.now();
+    }
+
     @PrePersist
     public void prePersist() {
         LocalDateTime now = LocalDateTime.now();
