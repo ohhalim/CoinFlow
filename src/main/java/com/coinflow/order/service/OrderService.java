@@ -9,8 +9,11 @@ import com.coinflow.order.domain.OrderSequence;
 import com.coinflow.order.domain.OrderSide;
 import com.coinflow.order.domain.OrderType;
 import com.coinflow.order.domain.TimeInForce;
+import com.coinflow.order.dto.CancelOrderResponse;
 import com.coinflow.order.dto.CreateOrderRequest;
 import com.coinflow.order.dto.CreateOrderResponse;
+import com.coinflow.order.dto.OrderDetailResponse;
+import com.coinflow.order.dto.OrderSummaryResponse;
 import com.coinflow.order.repository.OrderRepository;
 import com.coinflow.order.repository.OrderSequenceRepository;
 import com.coinflow.wallet.domain.Wallet;
@@ -106,6 +109,39 @@ public class OrderService {
 
         // 11. 반환 (매칭엔진은 추후 추가)
         return CreateOrderResponse.of(order, List.of());
+    }
+
+    @Transactional
+    public CancelOrderResponse cancelOrder(Long currentUserId, Long orderId) {
+
+        Order order = orderRepository.findByIdAndUserId(orderId, currentUserId)
+                .orElseThrow(() -> new ApiException(ErrorCode.ORDER_NOT_FOUND));
+
+        if (!order.isCancelable()) throw new ApiException(ErrorCode.ORDER_NOT_CANCELABLE);
+
+        BigDecimal releaseAmount = order.releasableAmount();
+        Wallet wallet = walletRepository.findByUserIdAndAssetWithLock(currentUserId, order.getLockedAsset())
+                .orElseThrow(() -> new ApiException(ErrorCode.INSUFFICIENT_BALANCE));
+        wallet.unlock(releaseAmount);
+
+        order.cancel();
+
+        return CancelOrderResponse.of(order, order.getLockedAsset(), releaseAmount.toPlainString());
+    }
+
+    @Transactional(readOnly = true)
+    public OrderDetailResponse getOrder(Long currentUserId, Long orderId) {
+        Order order = orderRepository.findByIdAndUserId(orderId, currentUserId)
+                .orElseThrow(() -> new ApiException(ErrorCode.ORDER_NOT_FOUND));
+        return OrderDetailResponse.from(order);
+    }
+
+    @Transactional(readOnly = true)
+    public List<OrderSummaryResponse> getOrders(Long currentUserId, String market) {
+        List<Order> orders = (market != null)
+                ? orderRepository.findAllByUserIdAndMarketSymbolOrderByCreatedAtDesc(currentUserId, market)
+                : orderRepository.findAllByUserIdOrderByCreatedAtDesc(currentUserId);
+        return orders.stream().map(OrderSummaryResponse::from).toList();
     }
 
     private OrderSide parseSide(String value) {
