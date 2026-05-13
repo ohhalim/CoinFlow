@@ -1,0 +1,98 @@
+package com.coinflow.order.domain;
+
+import jakarta.persistence.*;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
+
+@Getter
+@Entity
+@NoArgsConstructor
+@Table(name = "orders")
+public class    Order {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    private String clientOrderId;
+
+    private Long userId;
+    private Long marketId;
+    private String marketSymbol;
+
+    @Enumerated(EnumType.STRING)
+    private OrderSide side;
+
+    @Enumerated(EnumType.STRING)
+    private OrderType type;
+
+    @Enumerated(EnumType.STRING)
+    private TimeInForce timeInForce;
+
+    private BigDecimal price;
+    private BigDecimal originalQuantity;
+    private BigDecimal remainingQuantity;
+    private BigDecimal executedQuantity;
+    private BigDecimal executedQuoteAmount;
+
+    private String lockedAsset;
+    private BigDecimal lockedAmount;
+
+    @Enumerated(EnumType.STRING)
+    private OrderStatus status;
+
+    private Long sequence;
+
+    private LocalDateTime createdAt;
+    private LocalDateTime updatedAt;
+    private LocalDateTime closedAt;
+
+    public static Order create(
+            Long userId,
+            Long marketId,
+            String marketSymbol,
+            OrderSide side,
+            OrderType type,
+            TimeInForce timeInForce,
+            BigDecimal price,
+            BigDecimal originalQuantity,
+            String lockedAsset,
+            BigDecimal lockedAmount,
+            Long sequence,
+            String clientOrderId
+    ) {
+        Order order = new Order();
+        order.userId = userId;
+        order.marketId = marketId;
+        order.marketSymbol = marketSymbol;
+        order.side = side;
+        order.type = type;
+        order.timeInForce = timeInForce;
+        order.price = price;
+        order.originalQuantity = originalQuantity;
+        order.remainingQuantity = originalQuantity;
+        order.executedQuantity = BigDecimal.ZERO;
+        order.executedQuoteAmount = BigDecimal.ZERO;
+        order.lockedAsset = lockedAsset;
+        order.lockedAmount = lockedAmount;
+        order.status = OrderStatus.OPEN;
+        order.sequence = sequence;
+        order.clientOrderId = clientOrderId;
+        return order;
+    }
+
+    @PrePersist
+    public void prePersist() {
+        LocalDateTime now = LocalDateTime.now();
+        this.createdAt = now;
+        this.updatedAt = now;
+    }
+
+    @PreUpdate
+    public void preUpdate() {
+        this.updatedAt = LocalDateTime.now();
+    }
+}
