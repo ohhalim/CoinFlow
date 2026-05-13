@@ -8,6 +8,10 @@ import com.coinflow.auth.dto.TokenResponse;
 import com.coinflow.auth.repository.UserRepository;
 import com.coinflow.common.exception.ApiException;
 import com.coinflow.common.exception.ErrorCode;
+import com.coinflow.market.domain.AssetStatus;
+import com.coinflow.market.repository.AssetRepository;
+import com.coinflow.wallet.domain.Wallet;
+import com.coinflow.wallet.repository.WalletRepository;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -18,15 +22,21 @@ public class AuthService {
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
     private final JwtService jwtService;
+    private final AssetRepository assetRepository;
+    private final WalletRepository walletRepository;
 
     public AuthService(
             UserRepository userRepository,
             PasswordEncoder passwordEncoder,
-            JwtService jwtService
+            JwtService jwtService,
+            AssetRepository assetRepository,
+            WalletRepository walletRepository
     ) {
         this.userRepository = userRepository;
         this.passwordEncoder = passwordEncoder;
         this.jwtService = jwtService;
+        this.assetRepository = assetRepository;
+        this.walletRepository = walletRepository;
     }
 
     @Transactional
@@ -38,6 +48,11 @@ public class AuthService {
         String passwordHash = passwordEncoder.encode(request.password());
         User user = User.create(request.email(), passwordHash, request.nickname());
         User savedUser = userRepository.save(user);
+
+        assetRepository.findAllByStatus(AssetStatus.ACTIVE)
+                .stream()
+                .map(asset -> Wallet.create(savedUser.getId(), asset.getCode()))
+                .forEach(walletRepository::save);
 
         return SignupResponse.from(savedUser);
     }

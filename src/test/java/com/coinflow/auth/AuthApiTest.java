@@ -1,6 +1,8 @@
 package com.coinflow.auth;
 
+import com.coinflow.auth.repository.UserRepository;
 import com.coinflow.support.TestcontainersConfig;
+import com.coinflow.wallet.repository.WalletRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -8,6 +10,7 @@ import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.*;
 
+import java.math.BigDecimal;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -19,6 +22,12 @@ class AuthApiTest {
 
     @Autowired
     private TestRestTemplate restTemplate;
+
+    @Autowired
+    private UserRepository userRepository;
+
+    @Autowired
+    private WalletRepository walletRepository;
 
     // ── AUTH-001 회원가입 ──────────────────────────────────────────────
 
@@ -67,6 +76,19 @@ class AuthApiTest {
         assertThat(meResponse.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(meResponse.getBody()).containsKeys("userId", "email", "nickname", "status", "createdAt");
         assertThat(meResponse.getBody().get("email")).isEqualTo("auth004@example.com");
+    }
+
+    @Test
+    void 회원가입_시_ACTIVE_asset_wallet_자동_생성() {
+        signup("auth003@example.com", "password1234", "tester");
+
+        var user = userRepository.findByEmail("auth003@example.com").orElseThrow();
+        var wallets = walletRepository.findAllByUserId(user.getId());
+
+        assertThat(wallets).hasSize(2);
+        assertThat(wallets).extracting(w -> w.getAsset()).containsExactlyInAnyOrder("KRW", "BTC");
+        assertThat(wallets).allMatch(w -> w.getAvailableBalance().compareTo(BigDecimal.ZERO) == 0);
+        assertThat(wallets).allMatch(w -> w.getLockedBalance().compareTo(BigDecimal.ZERO) == 0);
     }
 
     // ── AUTH-003 로그인 실패 ───────────────────────────────────────────
