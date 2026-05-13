@@ -1,6 +1,7 @@
 package com.coinflow.order.dto;
 
 import com.coinflow.order.domain.Order;
+import com.coinflow.trade.domain.Trade;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -23,7 +24,17 @@ public record CreateOrderResponse(
         LocalDateTime createdAt,
         List<TradeResult> trades
 ) {
-    public static CreateOrderResponse of(Order order, List<TradeResult> trades) {
+    public static CreateOrderResponse of(Order order, List<Trade> trades) {
+        List<TradeResult> tradeResults = trades.stream()
+                .map(t -> new TradeResult(
+                        t.getId(),
+                        t.getPrice().toPlainString(),
+                        t.getQuantity().toPlainString(),
+                        t.getQuoteAmount().toPlainString(),
+                        t.getMakerOrderId().equals(order.getId()) ? "MAKER" : "TAKER",
+                        t.getTradedAt()
+                ))
+                .toList();
         return new CreateOrderResponse(
                 order.getId(),
                 order.getClientOrderId(),
@@ -40,7 +51,7 @@ public record CreateOrderResponse(
                 order.getLockedAmount().toPlainString(),
                 order.getStatus().name(),
                 order.getCreatedAt(),
-                trades
+                tradeResults
         );
     }
 

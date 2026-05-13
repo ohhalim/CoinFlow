@@ -14,8 +14,12 @@ import com.coinflow.order.dto.CreateOrderRequest;
 import com.coinflow.order.dto.CreateOrderResponse;
 import com.coinflow.order.dto.OrderDetailResponse;
 import com.coinflow.order.dto.OrderSummaryResponse;
+import com.coinflow.order.matching.MatchResult;
+import com.coinflow.order.matching.MatchingEngine;
 import com.coinflow.order.repository.OrderRepository;
 import com.coinflow.order.repository.OrderSequenceRepository;
+import com.coinflow.trade.domain.Trade;
+import com.coinflow.trade.repository.TradeRepository;
 import com.coinflow.wallet.domain.Wallet;
 import com.coinflow.wallet.repository.WalletRepository;
 import lombok.RequiredArgsConstructor;
@@ -24,6 +28,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.util.ArrayList;
 import java.util.List;
 
 @Service
@@ -34,6 +39,8 @@ public class OrderService {
     private final OrderRepository orderRepository;
     private final OrderSequenceRepository orderSequenceRepository;
     private final WalletRepository walletRepository;
+    private final TradeRepository tradeRepository;
+    private final MatchingEngine matchingEngine;
 
     @Transactional
     public CreateOrderResponse createOrder(Long currentUserId, CreateOrderRequest request) {
@@ -107,8 +114,11 @@ public class OrderService {
         );
         orderRepository.save(order);
 
-        // 11. 반환 (매칭엔진은 추후 추가)
-        return CreateOrderResponse.of(order, List.of());
+        // 11. 매칭 및 정산
+        List<MatchResult> matchResults = matchingEngine.match(market, order);
+        List<Trade> trades = settle(market, order, matchResults);
+
+        return CreateOrderResponse.of(order, trades);
     }
 
     @Transactional
@@ -125,6 +135,7 @@ public class OrderService {
         wallet.unlock(releaseAmount);
 
         order.cancel();
+        matchingEngine.cancelOrder(order.getMarketSymbol(), order);
 
         return CancelOrderResponse.of(order, order.getLockedAsset(), releaseAmount.toPlainString());
     }
@@ -142,6 +153,46 @@ public class OrderService {
                 ? orderRepository.findAllByUserIdAndMarketSymbolOrderByCreatedAtDesc(currentUserId, market)
                 : orderRepository.findAllByUserIdOrderByCreatedAtDesc(currentUserId);
         return orders.stream().map(OrderSummaryResponse::from).toList();
+    }
+
+    private List<Trade> settle(Market market, Order taker, List<MatchResult> matchResults) {
+        if (matchResults.isEmpty()) return List.of();
+
+        List<Trade> trades = new ArrayList<>();
+
+        for (MatchResult result : matchResults) {
+            Order maker = orderRepository.findById(result.makerOrderId()).orElseThrow();
+
+            // maker, taker order 수량 업데이트
+            maker.fill(result.quantity(), result.quoteAmount());
+            taker.fill(result.quantity(), result.quoteAmount());
+
+            // 정산: BUY 유저 → baseAsset 지급, SELL 유저 → quoteAsset 지급
+            Wallet buyerBaseWallet  = walletRepository.findByUserIdAndAssetWithLock(result.buyUserId(),  market.getBaseAsset()).orElseThrow();
+            Wallet sellerQuoteWallet = walletRepository.findByUserIdAndAssetWithLock(result.sellUserId(), market.getQuoteAsset()).orElseThrow();
+            Wallet sellerBaseWallet  = walletRepository.findByUserIdAndAssetWithLock(result.sellUserId(), market.getBaseAsset()).orElseThrow();
+            Wallet buyerQuoteWallet  = walletRepository.findByUserIdAndAssetWithLock(result.buyUserId(),  market.getQuoteAsset()).orElseThrow();
+
+            // BUY 유저: quoteAsset locked 소진 + baseAsset 지급
+            buyerQuoteWallet.unlock(result.quoteAmount());
+            buyerBaseWallet.deposit(result.quantity());
+
+            // SELL 유저: baseAsset locked 소진 + quoteAsset 지급
+            sellerBaseWallet.unlock(result.quantity());
+            sellerQuoteWallet.deposit(result.quoteAmount());
+
+            Trade trade = Trade.create(
+                    market.getId(), market.getSymbol(),
+                    result.buyOrderId(), result.sellOrderId(),
+                    result.makerOrderId(), result.takerOrderId(),
+                    result.buyUserId(), result.sellUserId(),
+                    result.price(), result.quantity(), result.quoteAmount()
+            );
+            tradeRepository.save(trade);
+            trades.add(trade);
+        }
+
+        return trades;
     }
 
     private OrderSide parseSide(String value) {

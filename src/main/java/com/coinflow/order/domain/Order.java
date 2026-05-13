@@ -95,6 +95,19 @@ public class    Order {
         return remainingQuantity;
     }
 
+    public void fill(BigDecimal quantity, BigDecimal quoteAmount) {
+        this.executedQuantity = this.executedQuantity.add(quantity);
+        this.executedQuoteAmount = this.executedQuoteAmount.add(quoteAmount);
+        this.remainingQuantity = this.remainingQuantity.subtract(quantity);
+
+        if (this.remainingQuantity.compareTo(BigDecimal.ZERO) == 0) {
+            this.status = OrderStatus.FILLED;
+            this.closedAt = LocalDateTime.now();
+        } else {
+            this.status = OrderStatus.PARTIALLY_FILLED;
+        }
+    }
+
     public void cancel() {
         this.status = OrderStatus.CANCELED;
         this.closedAt = LocalDateTime.now();
