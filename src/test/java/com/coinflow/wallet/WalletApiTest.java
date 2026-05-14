@@ -182,6 +182,74 @@ class WalletApiTest {
         assertThat(sellerKrwLedgers.get(0).getDeltaAvailable()).isEqualByComparingTo("10000");
     }
 
+    // ── WAL-003 입금 API ──────────────────────────────────────────────
+
+    @Test
+    void KRW_입금_성공() {
+        String token = signupAndLogin("wallet007@example.com");
+
+        var response = depositViaApi(token, "KRW", "1000000");
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody().get("asset")).isEqualTo("KRW");
+        assertThat(new BigDecimal((String) response.getBody().get("availableBalance")))
+                .isEqualByComparingTo("1000000");
+    }
+
+    @Test
+    void BTC_입금_성공() {
+        String token = signupAndLogin("wallet008@example.com");
+
+        var response = depositViaApi(token, "BTC", "0.5");
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody().get("asset")).isEqualTo("BTC");
+        assertThat(new BigDecimal((String) response.getBody().get("availableBalance")))
+                .isEqualByComparingTo("0.5");
+    }
+
+    @Test
+    void 입금_후_SEED_DEPOSIT_원장_기록() {
+        String token = signupAndLogin("wallet009@example.com");
+        depositViaApi(token, "KRW", "500000");
+
+        var user = userRepository.findByEmail("wallet009@example.com").orElseThrow();
+        List<WalletLedger> ledgers = walletLedgerRepository
+                .findAllByUserIdAndAssetOrderByCreatedAtDesc(user.getId(), "KRW");
+
+        assertThat(ledgers).hasSize(1);
+        assertThat(ledgers.get(0).getType()).isEqualTo(LedgerType.SEED_DEPOSIT);
+        assertThat(ledgers.get(0).getDeltaAvailable()).isEqualByComparingTo("500000");
+        assertThat(ledgers.get(0).getAvailableBalanceAfter()).isEqualByComparingTo("500000");
+    }
+
+    @Test
+    void 존재하지_않는_자산_입금_실패() {
+        String token = signupAndLogin("wallet010@example.com");
+
+        var response = depositViaApi(token, "ETH", "1.0");
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(response.getBody().get("code")).isEqualTo("WALLET_NOT_FOUND");
+    }
+
+    @Test
+    void 입금액_0이하_실패() {
+        String token = signupAndLogin("wallet011@example.com");
+
+        var response = depositViaApi(token, "KRW", "0");
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody().get("code")).isEqualTo("INVALID_AMOUNT");
+    }
+
+    @Test
+    void 입금_토큰_없음() {
+        var response = restTemplate.postForEntity("/api/v1/wallets/deposit",
+                Map.of("asset", "KRW", "amount", "1000"), Map.class);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+    }
+
     // ── helpers ───────────────────────────────────────────────────────
 
     private String signupAndLogin(String email) {
@@ -235,6 +303,13 @@ class WalletApiTest {
         HttpHeaders headers = new HttpHeaders();
         headers.setBearerAuth(token);
         return restTemplate.exchange("/api/v1/orders/" + orderId + "/cancel", HttpMethod.POST, new HttpEntity<>(headers), Map.class);
+    }
+
+    private ResponseEntity<Map> depositViaApi(String token, String asset, String amount) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setBearerAuth(token);
+        return restTemplate.exchange("/api/v1/wallets/deposit", HttpMethod.POST,
+                new HttpEntity<>(Map.of("asset", asset, "amount", amount), headers), Map.class);
     }
 
     private ResponseEntity<List> getWallets(String token) {
