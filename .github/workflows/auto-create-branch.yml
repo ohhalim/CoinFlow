@@ -38,13 +38,19 @@ jobs:
             const body = issue.body || '';
             const labels = (issue.labels || []).map(l => l.name.toLowerCase());
 
-            // 1) type 결정 (우선순위: hotfix > release > refactor > fix > chore > feat)
+            // 1) type 결정 (우선순위: hotfix > release > refactor > fix > setting > chore > feat)
+            //    라벨이 없거나 적용되지 않은 경우 이슈 템플릿 제목([Refactor]: 등)을 fallback으로 사용한다.
+            const title = issue.title || '';
+            const titleTypeMatch = title.match(/^\[(hotfix|release|refactor|fix|setting|chore|feat)\]\s*:/i);
+
             let type = 'feat';
             if (labels.includes('hotfix')) type = 'hotfix';
             else if (labels.includes('release')) type = 'release';
             else if (labels.includes('refactor')) type = 'refactor';
             else if (labels.includes('fix')) type = 'fix';
+            else if (labels.includes('setting')) type = 'setting';
             else if (labels.includes('chore')) type = 'chore';
+            else if (titleTypeMatch) type = titleTypeMatch[1].toLowerCase();
 
             // 2) 이슈 폼에서 Branch Keyword 추출 (### Branch Keyword 다음 줄)
             const m = body.match(/###\s*Branch Keyword\s*\n([^\n]+)/i);
