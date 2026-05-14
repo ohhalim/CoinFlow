@@ -20,7 +20,10 @@ import com.coinflow.order.repository.OrderRepository;
 import com.coinflow.order.repository.OrderSequenceRepository;
 import com.coinflow.trade.domain.Trade;
 import com.coinflow.trade.repository.TradeRepository;
+import com.coinflow.wallet.domain.LedgerType;
 import com.coinflow.wallet.domain.Wallet;
+import com.coinflow.wallet.domain.WalletLedger;
+import com.coinflow.wallet.repository.WalletLedgerRepository;
 import com.coinflow.wallet.repository.WalletRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -40,6 +43,7 @@ public class OrderService {
     private final OrderSequenceRepository orderSequenceRepository;
     private final WalletRepository walletRepository;
     private final TradeRepository tradeRepository;
+    private final WalletLedgerRepository walletLedgerRepository;
     private final MatchingEngine matchingEngine;
 
     @Transactional
@@ -114,6 +118,12 @@ public class OrderService {
         );
         orderRepository.save(order);
 
+        walletLedgerRepository.save(WalletLedger.create(
+                wallet, LedgerType.ORDER_LOCK,
+                lockedAmount.negate(), lockedAmount,
+                order.getId(), null
+        ));
+
         // 11. 매칭 및 정산
         List<MatchResult> matchResults = matchingEngine.match(market, order);
         List<Trade> trades = settle(market, order, matchResults);
@@ -133,6 +143,11 @@ public class OrderService {
         Wallet wallet = walletRepository.findByUserIdAndAssetWithLock(currentUserId, order.getLockedAsset())
                 .orElseThrow(() -> new ApiException(ErrorCode.INSUFFICIENT_BALANCE));
         wallet.unlock(releaseAmount);
+        walletLedgerRepository.save(WalletLedger.create(
+                wallet, LedgerType.ORDER_CANCEL_RELEASE,
+                releaseAmount, releaseAmount.negate(),
+                orderId, null
+        ));
 
         order.cancel();
         matchingEngine.cancelOrder(order.getMarketSymbol(), order);
@@ -189,6 +204,32 @@ public class OrderService {
                     result.price(), result.quantity(), result.quoteAmount()
             );
             tradeRepository.save(trade);
+
+            Long buyOrderId  = result.buyOrderId();
+            Long sellOrderId = result.sellOrderId();
+            Long tradeId     = trade.getId();
+
+            walletLedgerRepository.save(WalletLedger.create(
+                    buyerQuoteWallet, LedgerType.TRADE_BUY_QUOTE_SETTLE,
+                    result.quoteAmount(), result.quoteAmount().negate(),
+                    buyOrderId, tradeId
+            ));
+            walletLedgerRepository.save(WalletLedger.create(
+                    buyerBaseWallet, LedgerType.TRADE_BUY_BASE_CREDIT,
+                    result.quantity(), BigDecimal.ZERO,
+                    buyOrderId, tradeId
+            ));
+            walletLedgerRepository.save(WalletLedger.create(
+                    sellerBaseWallet, LedgerType.TRADE_SELL_BASE_SETTLE,
+                    BigDecimal.ZERO, result.quantity().negate(),
+                    sellOrderId, tradeId
+            ));
+            walletLedgerRepository.save(WalletLedger.create(
+                    sellerQuoteWallet, LedgerType.TRADE_SELL_QUOTE_CREDIT,
+                    result.quoteAmount(), BigDecimal.ZERO,
+                    sellOrderId, tradeId
+            ));
+
             trades.add(trade);
         }
 

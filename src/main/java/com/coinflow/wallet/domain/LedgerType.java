@@ -1,0 +1,11 @@
+package com.coinflow.wallet.domain;
+
+public enum LedgerType {
+    SEED_DEPOSIT,
+    ORDER_LOCK,
+    ORDER_CANCEL_RELEASE,
+    TRADE_BUY_QUOTE_SETTLE,
+    TRADE_BUY_BASE_CREDIT,
+    TRADE_SELL_BASE_SETTLE,
+    TRADE_SELL_QUOTE_CREDIT
+}
