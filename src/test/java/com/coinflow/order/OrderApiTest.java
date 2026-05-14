@@ -288,10 +288,9 @@ class OrderApiTest {
         createOrder(token, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000", "0.0001", null);
         var sellResponse = createOrder(token, "BTC-KRW", "SELL", "LIMIT", "GTC", "100000000", "0.0001", null);
 
-        // self-trade 방지로 체결 안 됨 → SELL은 OPEN 상태
-        assertThat(sellResponse.getBody().get("status")).isEqualTo("OPEN");
-        var trades = (java.util.List<?>) sellResponse.getBody().get("trades");
-        assertThat(trades).isEmpty();
+        // self-trade 방지 → taker 전체 거절
+        assertThat(sellResponse.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(sellResponse.getBody().get("code")).isEqualTo("SELF_TRADE_NOT_ALLOWED");
     }
 
     // ── helpers ───────────────────────────────────────────────────────
