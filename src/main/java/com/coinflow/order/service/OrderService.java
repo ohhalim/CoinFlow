@@ -14,6 +14,7 @@ import com.coinflow.order.dto.CreateOrderRequest;
 import com.coinflow.order.dto.CreateOrderResponse;
 import com.coinflow.order.dto.OrderDetailResponse;
 import com.coinflow.order.dto.OrderSummaryResponse;
+import com.coinflow.event.service.DomainEventRecorder;
 import com.coinflow.order.matching.MatchResult;
 import com.coinflow.order.matching.MatchingEngine;
 import com.coinflow.order.repository.OrderRepository;
@@ -50,6 +51,7 @@ public class OrderService {
     private final TradeRepository tradeRepository;
     private final WalletLedgerRepository walletLedgerRepository;
     private final MatchingEngine matchingEngine;
+    private final DomainEventRecorder eventRecorder;
     private final TransactionTemplate transactionTemplate;
 
     private final Map<Long, ReentrantLock> marketLocks = new ConcurrentHashMap<>();
@@ -62,6 +64,7 @@ public class OrderService {
             TradeRepository tradeRepository,
             WalletLedgerRepository walletLedgerRepository,
             MatchingEngine matchingEngine,
+            DomainEventRecorder eventRecorder,
             PlatformTransactionManager transactionManager
     ) {
         this.marketRepository = marketRepository;
@@ -71,6 +74,7 @@ public class OrderService {
         this.tradeRepository = tradeRepository;
         this.walletLedgerRepository = walletLedgerRepository;
         this.matchingEngine = matchingEngine;
+        this.eventRecorder = eventRecorder;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
@@ -147,6 +151,7 @@ public class OrderService {
                         sequence, request.clientOrderId()
                 );
                 orderRepository.save(order);
+                eventRecorder.recordOrderAccepted(order);
 
                 // ORDER_LOCK ledger
                 walletLedgerRepository.save(WalletLedger.create(
@@ -195,6 +200,7 @@ public class OrderService {
 
                 lockedOrder.cancel();
                 matchingEngine.cancelOrder(lockedOrder.getMarketSymbol(), lockedOrder);
+                eventRecorder.recordOrderCanceled(lockedOrder, lockedOrder.getLockedAsset(), releaseAmount.toPlainString());
 
                 return CancelOrderResponse.of(lockedOrder, lockedOrder.getLockedAsset(), releaseAmount.toPlainString());
             });
@@ -265,6 +271,10 @@ public class OrderService {
             Long sellOrderId = result.sellOrderId();
             Long tradeId     = trade.getId();
 
+            eventRecorder.recordOrderFillEvent(maker, tradeId);
+            eventRecorder.recordOrderFillEvent(taker, tradeId);
+            eventRecorder.recordTradeCreated(trade);
+
             walletLedgerRepository.save(WalletLedger.create(
                     buyerQuoteWallet, LedgerType.TRADE_BUY_QUOTE_SETTLE,
                     buyerRefund, buyerReleased.negate(),
@@ -286,6 +296,7 @@ public class OrderService {
                     sellOrderId, tradeId
             ));
 
+            eventRecorder.recordSettlementCompleted(trade);
             trades.add(trade);
         }
 
