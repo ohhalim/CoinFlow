@@ -2,8 +2,10 @@ package com.coinflow.order.matching;
 
 import com.coinflow.market.domain.Market;
 import com.coinflow.order.domain.Order;
+import com.coinflow.order.domain.OrderSide;
 import org.springframework.stereotype.Component;
 
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -33,6 +35,19 @@ public class MatchingEngine {
         if (book != null) {
             book.remove(order.getId(), order.getSide());
         }
+    }
+
+    public void addToBook(Market market, Order order) {
+        MemoryOrderBook book = orderBooks.computeIfAbsent(
+                market.getSymbol(),
+                k -> new MemoryOrderBook(market.getAmountScale())
+        );
+        book.add(order);
+    }
+
+    public boolean hasSelfTrade(String marketSymbol, OrderSide side, BigDecimal price, Long userId) {
+        MemoryOrderBook book = orderBooks.get(marketSymbol);
+        return book != null && book.hasSelfTrade(side, price, userId);
     }
 
     public List<OrderBookEntry> getBuySide(String marketSymbol) {

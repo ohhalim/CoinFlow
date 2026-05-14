@@ -1,6 +1,7 @@
 package com.coinflow.order.repository;
 
 import com.coinflow.order.domain.Order;
+import com.coinflow.order.domain.OrderStatus;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.util.List;
@@ -14,4 +15,6 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
     List<Order> findAllByUserIdOrderByCreatedAtDesc(Long userId);
 
     List<Order> findAllByUserIdAndMarketSymbolOrderByCreatedAtDesc(Long userId, String marketSymbol);
+
+    List<Order> findAllByStatusInOrderBySequenceAsc(List<OrderStatus> statuses);
 }

@@ -99,6 +99,17 @@ public class MemoryOrderBook {
         queue.removeIf(e -> e.orderId().equals(orderId));
     }
 
+    public boolean hasSelfTrade(OrderSide takerSide, BigDecimal takerPrice, Long userId) {
+        PriorityQueue<OrderBookEntry> makerQueue = (takerSide == OrderSide.BUY) ? sellQueue : buyQueue;
+        for (OrderBookEntry maker : makerQueue) {
+            boolean priceMatches = (takerSide == OrderSide.BUY)
+                    ? takerPrice.compareTo(maker.price()) >= 0
+                    : takerPrice.compareTo(maker.price()) <= 0;
+            if (priceMatches && maker.userId().equals(userId)) return true;
+        }
+        return false;
+    }
+
     public List<OrderBookEntry> getBuySide() {
         return buyQueue.stream()
                 .sorted(Comparator.comparing(OrderBookEntry::price).reversed()
