@@ -35,6 +35,16 @@ public class MatchingEngine {
         }
     }
 
+    public List<OrderBookEntry> getBuySide(String marketSymbol) {
+        MemoryOrderBook book = orderBooks.get(marketSymbol);
+        return book != null ? book.getBuySide() : List.of();
+    }
+
+    public List<OrderBookEntry> getSellSide(String marketSymbol) {
+        MemoryOrderBook book = orderBooks.get(marketSymbol);
+        return book != null ? book.getSellSide() : List.of();
+    }
+
     public void clearAll() {
         orderBooks.clear();
     }

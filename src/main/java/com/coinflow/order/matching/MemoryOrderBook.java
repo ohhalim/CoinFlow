@@ -98,4 +98,18 @@ public class MemoryOrderBook {
         PriorityQueue<OrderBookEntry> queue = (side == OrderSide.BUY) ? buyQueue : sellQueue;
         queue.removeIf(e -> e.orderId().equals(orderId));
     }
+
+    public List<OrderBookEntry> getBuySide() {
+        return buyQueue.stream()
+                .sorted(Comparator.comparing(OrderBookEntry::price).reversed()
+                        .thenComparing(OrderBookEntry::sequence))
+                .toList();
+    }
+
+    public List<OrderBookEntry> getSellSide() {
+        return sellQueue.stream()
+                .sorted(Comparator.comparing(OrderBookEntry::price)
+                        .thenComparing(OrderBookEntry::sequence))
+                .toList();
+    }
 }

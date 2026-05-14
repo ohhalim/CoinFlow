@@ -9,4 +9,5 @@ import java.util.Optional;
 public interface MarketRepository extends JpaRepository<Market, Long> {
     Optional<Market> findBySymbol(String symbol);
     List<Market> findAllByStatusNot(com.coinflow.market.domain.MarketStatus status);
+    List<Market> findAllByStatus(com.coinflow.market.domain.MarketStatus status);
 }
