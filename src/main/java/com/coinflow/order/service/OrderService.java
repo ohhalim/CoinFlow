@@ -27,7 +27,7 @@ import com.coinflow.wallet.domain.WalletLedger;
 import com.coinflow.wallet.repository.WalletLedgerRepository;
 import com.coinflow.wallet.repository.WalletRepository;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.data.domain.PageRequest;
+import com.coinflow.common.pagination.OffsetBasedPageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
@@ -214,8 +214,20 @@ public class OrderService {
                 ));
 
                 lockedOrder.cancel();
-                matchingEngine.cancelOrder(lockedOrder.getMarketSymbol(), lockedOrder);
                 eventRecorder.recordOrderCanceled(lockedOrder, lockedOrder.getLockedAsset(), releaseAmount.toPlainString());
+
+                String marketSymbol = lockedOrder.getMarketSymbol();
+                Order canceledOrder = lockedOrder;
+                TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                    @Override
+                    public void afterCommit() {
+                        try {
+                            matchingEngine.cancelOrder(marketSymbol, canceledOrder);
+                        } catch (Exception e) {
+                            log.error("오더북 cancelOrder 실패: orderId={}, DB 취소 완료 but 오더북에 잔존", canceledOrder.getId(), e);
+                        }
+                    }
+                });
 
                 return CancelOrderResponse.of(lockedOrder, lockedOrder.getLockedAsset(), releaseAmount.toPlainString());
             });
@@ -237,7 +249,7 @@ public class OrderService {
 
     @Transactional(readOnly = true)
     public List<OrderSummaryResponse> getOrders(Long currentUserId, String market, int limit, int offset) {
-        var pageable = PageRequest.of(offset / limit, limit);
+        var pageable = new OffsetBasedPageRequest(offset, limit);
         List<Order> orders = (market != null)
                 ? orderRepository.findAllByUserIdAndMarketSymbolOrderByCreatedAtDesc(currentUserId, market, pageable)
                 : orderRepository.findAllByUserIdOrderByCreatedAtDesc(currentUserId, pageable);

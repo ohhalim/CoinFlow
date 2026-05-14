@@ -3,10 +3,13 @@ package com.coinflow.trade.api;
 import com.coinflow.trade.dto.FillResponse;
 import com.coinflow.trade.dto.TradeResponse;
 import com.coinflow.trade.repository.TradeRepository;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -18,6 +21,7 @@ import java.util.List;
 @RestController
 @RequiredArgsConstructor
 @RequestMapping("/api/v1")
+@Validated
 public class TradeController {
 
     private final TradeRepository tradeRepository;
@@ -25,7 +29,7 @@ public class TradeController {
     @GetMapping("/markets/{market}/trades")
     public List<TradeResponse> getTrades(
             @PathVariable String market,
-            @RequestParam(defaultValue = "20") int limit
+            @RequestParam(defaultValue = "20") @Min(1) @Max(100) int limit
     ) {
         return tradeRepository.findAllByMarketSymbolOrderByTradedAtDesc(market, PageRequest.of(0, limit))
                 .stream()
@@ -37,8 +41,8 @@ public class TradeController {
     public List<FillResponse> getFills(
             @AuthenticationPrincipal Jwt jwt,
             @RequestParam(required = false) String market,
-            @RequestParam(defaultValue = "0") long lastFillId,
-            @RequestParam(defaultValue = "50") int limit
+            @RequestParam(defaultValue = "0") @Min(0) long lastFillId,
+            @RequestParam(defaultValue = "50") @Min(1) @Max(200) int limit
     ) {
         Long userId = Long.parseLong(jwt.getSubject());
         var pageable = PageRequest.of(0, limit);

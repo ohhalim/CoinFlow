@@ -1,9 +1,13 @@
 package com.coinflow.query;
 
 import com.coinflow.auth.repository.UserRepository;
+import com.coinflow.event.repository.DomainEventRepository;
 import com.coinflow.order.matching.MatchingEngine;
+import com.coinflow.order.repository.OrderRepository;
 import com.coinflow.support.TestcontainersConfig;
+import com.coinflow.trade.repository.TradeRepository;
 import com.coinflow.wallet.domain.Wallet;
+import com.coinflow.wallet.repository.WalletLedgerRepository;
 import com.coinflow.wallet.repository.WalletRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -27,11 +31,21 @@ class QueryApiTest {
     @Autowired private TestRestTemplate restTemplate;
     @Autowired private UserRepository userRepository;
     @Autowired private WalletRepository walletRepository;
+    @Autowired private WalletLedgerRepository walletLedgerRepository;
+    @Autowired private OrderRepository orderRepository;
+    @Autowired private TradeRepository tradeRepository;
+    @Autowired private DomainEventRepository domainEventRepository;
     @Autowired private MatchingEngine matchingEngine;
 
     @BeforeEach
     void setUp() {
         matchingEngine.clearAll();
+        walletLedgerRepository.deleteAll();
+        domainEventRepository.deleteAll();
+        tradeRepository.deleteAll();
+        orderRepository.deleteAll();
+        walletRepository.deleteAll();
+        userRepository.deleteAll();
     }
 
     // ── QRY-001 시장 목록 조회 ────────────────────────────────────────

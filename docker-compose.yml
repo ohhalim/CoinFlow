@@ -4,7 +4,7 @@ services:
     environment:
       MYSQL_DATABASE: coinflow
       MYSQL_USER: coinflow
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-coinflow}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-coinflow}
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
     ports:
       - "3306:3306"
