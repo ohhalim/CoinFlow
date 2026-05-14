@@ -226,17 +226,30 @@ public class OrderService {
         for (MatchResult result : matchResults) {
             Order maker = orderRepository.findById(result.makerOrderId()).orElseThrow();
 
-            maker.fill(result.quantity(), result.quoteAmount());
-            taker.fill(result.quantity(), result.quoteAmount());
+            boolean takerIsBuy = taker.getSide() == OrderSide.BUY;
+            Order buyOrder = takerIsBuy ? taker : maker;
+
+            // Capture buy order's locked amount BEFORE fill so we can compute what was released
+            BigDecimal oldBuyLocked = buyOrder.getLockedAmount();
+
+            maker.fill(result.quantity(), result.quoteAmount(), market.getAmountScale());
+            taker.fill(result.quantity(), result.quoteAmount(), market.getAmountScale());
+
+            // buyerReleased = portion of locked consumed this fill (quoteAmount paid + any rounding refund)
+            BigDecimal buyerReleased = oldBuyLocked.subtract(buyOrder.getLockedAmount());
+            BigDecimal buyerRefund   = buyerReleased.subtract(result.quoteAmount());
 
             Wallet buyerBaseWallet   = walletRepository.findByUserIdAndAssetWithLock(result.buyUserId(),  market.getBaseAsset()).orElseThrow();
             Wallet sellerQuoteWallet = walletRepository.findByUserIdAndAssetWithLock(result.sellUserId(), market.getQuoteAsset()).orElseThrow();
             Wallet sellerBaseWallet  = walletRepository.findByUserIdAndAssetWithLock(result.sellUserId(), market.getBaseAsset()).orElseThrow();
             Wallet buyerQuoteWallet  = walletRepository.findByUserIdAndAssetWithLock(result.buyUserId(),  market.getQuoteAsset()).orElseThrow();
 
-            buyerQuoteWallet.unlock(result.quoteAmount());
+            buyerQuoteWallet.consumeLocked(buyerReleased);
+            if (buyerRefund.compareTo(BigDecimal.ZERO) > 0) {
+                buyerQuoteWallet.deposit(buyerRefund);
+            }
             buyerBaseWallet.deposit(result.quantity());
-            sellerBaseWallet.unlock(result.quantity());
+            sellerBaseWallet.consumeLocked(result.quantity());
             sellerQuoteWallet.deposit(result.quoteAmount());
 
             Trade trade = Trade.create(
@@ -254,7 +267,7 @@ public class OrderService {
 
             walletLedgerRepository.save(WalletLedger.create(
                     buyerQuoteWallet, LedgerType.TRADE_BUY_QUOTE_SETTLE,
-                    result.quoteAmount(), result.quoteAmount().negate(),
+                    buyerRefund, buyerReleased.negate(),
                     buyOrderId, tradeId
             ));
             walletLedgerRepository.save(WalletLedger.create(
