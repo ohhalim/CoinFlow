@@ -36,12 +36,15 @@ public class TradeController {
     @GetMapping("/fills")
     public List<FillResponse> getFills(
             @AuthenticationPrincipal Jwt jwt,
-            @RequestParam(required = false) String market
+            @RequestParam(required = false) String market,
+            @RequestParam(defaultValue = "0") long lastFillId,
+            @RequestParam(defaultValue = "50") int limit
     ) {
         Long userId = Long.parseLong(jwt.getSubject());
+        var pageable = PageRequest.of(0, limit);
         var trades = (market != null)
-                ? tradeRepository.findAllByUserIdAndMarket(userId, market)
-                : tradeRepository.findAllByUserId(userId);
+                ? tradeRepository.findAllByUserIdAndMarket(userId, market, lastFillId, pageable)
+                : tradeRepository.findAllByUserId(userId, lastFillId, pageable);
         return trades.stream().map(t -> FillResponse.of(t, userId)).toList();
     }
 }

@@ -7,10 +7,13 @@ import com.coinflow.order.dto.OrderDetailResponse;
 import com.coinflow.order.dto.OrderSummaryResponse;
 import com.coinflow.order.service.OrderService;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -25,6 +28,7 @@ import java.util.List;
 @RestController
 @RequiredArgsConstructor
 @RequestMapping("/api/v1/orders")
+@Validated
 public class OrderController {
 
     private final OrderService orderService;
@@ -51,10 +55,12 @@ public class OrderController {
     @GetMapping
     public List<OrderSummaryResponse> getOrders(
             @AuthenticationPrincipal Jwt jwt,
-            @RequestParam(required = false) String market
+            @RequestParam(required = false) String market,
+            @RequestParam(defaultValue = "50") @Min(1) @Max(200) int limit,
+            @RequestParam(defaultValue = "0") @Min(0) int offset
     ) {
         Long userId = Long.parseLong(jwt.getSubject());
-        return orderService.getOrders(userId, market);
+        return orderService.getOrders(userId, market, limit, offset);
     }
 
     @GetMapping("/{id}")

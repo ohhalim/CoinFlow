@@ -8,6 +8,8 @@ import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import org.springframework.data.domain.Pageable;
+
 import java.util.List;
 import java.util.Optional;
 
@@ -20,9 +22,9 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
     @Query("SELECT o FROM Order o WHERE o.id = :id")
     Optional<Order> findByIdWithLock(@Param("id") Long id);
 
-    List<Order> findAllByUserIdOrderByCreatedAtDesc(Long userId);
+    List<Order> findAllByUserIdOrderByCreatedAtDesc(Long userId, Pageable pageable);
 
-    List<Order> findAllByUserIdAndMarketSymbolOrderByCreatedAtDesc(Long userId, String marketSymbol);
+    List<Order> findAllByUserIdAndMarketSymbolOrderByCreatedAtDesc(Long userId, String marketSymbol, Pageable pageable);
 
     List<Order> findAllByStatusInOrderBySequenceAsc(List<OrderStatus> statuses);
 }

@@ -27,6 +27,7 @@ import com.coinflow.wallet.domain.WalletLedger;
 import com.coinflow.wallet.repository.WalletLedgerRepository;
 import com.coinflow.wallet.repository.WalletRepository;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
@@ -235,10 +236,11 @@ public class OrderService {
     }
 
     @Transactional(readOnly = true)
-    public List<OrderSummaryResponse> getOrders(Long currentUserId, String market) {
+    public List<OrderSummaryResponse> getOrders(Long currentUserId, String market, int limit, int offset) {
+        var pageable = PageRequest.of(offset / limit, limit);
         List<Order> orders = (market != null)
-                ? orderRepository.findAllByUserIdAndMarketSymbolOrderByCreatedAtDesc(currentUserId, market)
-                : orderRepository.findAllByUserIdOrderByCreatedAtDesc(currentUserId);
+                ? orderRepository.findAllByUserIdAndMarketSymbolOrderByCreatedAtDesc(currentUserId, market, pageable)
+                : orderRepository.findAllByUserIdOrderByCreatedAtDesc(currentUserId, pageable);
         return orders.stream().map(OrderSummaryResponse::from).toList();
     }
 
