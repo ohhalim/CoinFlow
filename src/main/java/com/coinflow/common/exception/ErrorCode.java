@@ -22,6 +22,8 @@ public enum ErrorCode {
     INVALID_STEP_SIZE(HttpStatus.BAD_REQUEST, "INVALID_STEP_SIZE", "Quantity does not match step size"),
     MIN_ORDER_QUANTITY_NOT_MET(HttpStatus.BAD_REQUEST, "MIN_ORDER_QUANTITY_NOT_MET", "Quantity is below minimum"),
     MIN_ORDER_AMOUNT_NOT_MET(HttpStatus.BAD_REQUEST, "MIN_ORDER_AMOUNT_NOT_MET", "Order amount is below minimum"),
+    WALLET_NOT_FOUND(HttpStatus.NOT_FOUND, "WALLET_NOT_FOUND", "Wallet not found"),
+    INVALID_AMOUNT(HttpStatus.BAD_REQUEST, "INVALID_AMOUNT", "Amount must be greater than zero"),
     INSUFFICIENT_BALANCE(HttpStatus.BAD_REQUEST, "INSUFFICIENT_BALANCE", "Insufficient balance"),
     DUPLICATE_CLIENT_ORDER_ID(HttpStatus.CONFLICT, "DUPLICATE_CLIENT_ORDER_ID", "Duplicate client order id"),
 
