@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
+import java.time.Instant;
 import java.util.Map;
 
 @Service
@@ -91,7 +92,12 @@ public class DomainEventRecorder {
     private void save(DomainEventType type, String aggregateType, Long aggregateId,
                       Long marketId, String marketSymbol, Map<String, Object> payload) {
         try {
-            String json = objectMapper.writeValueAsString(payload);
+            Map<String, Object> envelope = Map.of(
+                    "schemaVersion", "1.0",
+                    "occurredAt", Instant.now().toString(),
+                    "payload", payload
+            );
+            String json = objectMapper.writeValueAsString(envelope);
             domainEventRepository.save(
                     DomainEvent.create(type, aggregateType, aggregateId, marketId, marketSymbol, json)
             );
