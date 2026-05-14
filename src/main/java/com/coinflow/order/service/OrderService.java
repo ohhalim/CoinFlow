@@ -107,11 +107,6 @@ public class OrderService {
         if (wallet.getAvailableBalance().compareTo(lockedAmount) < 0)
             throw new ApiException(ErrorCode.INSUFFICIENT_BALANCE);
         wallet.lock(lockedAmount);
-        walletLedgerRepository.save(WalletLedger.create(
-                wallet, LedgerType.ORDER_LOCK,
-                lockedAmount.negate(), lockedAmount,
-                null, null
-        ));
 
         // 10. order 저장
         Order order = Order.create(
@@ -122,6 +117,12 @@ public class OrderService {
                 sequence, request.clientOrderId()
         );
         orderRepository.save(order);
+
+        walletLedgerRepository.save(WalletLedger.create(
+                wallet, LedgerType.ORDER_LOCK,
+                lockedAmount.negate(), lockedAmount,
+                order.getId(), null
+        ));
 
         // 11. 매칭 및 정산
         List<MatchResult> matchResults = matchingEngine.match(market, order);
