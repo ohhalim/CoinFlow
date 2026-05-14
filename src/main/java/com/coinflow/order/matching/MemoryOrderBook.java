@@ -85,6 +85,85 @@ public class MemoryOrderBook {
         return results;
     }
 
+    public List<MatchResult> planMatch(Order taker) {
+        PriorityQueue<OrderBookEntry> makerQueue = (taker.getSide() == OrderSide.BUY) ? sellQueue : buyQueue;
+        PriorityQueue<OrderBookEntry> simulation = new PriorityQueue<>(makerQueue);
+
+        List<MatchResult> results = new ArrayList<>();
+        BigDecimal takerRemaining = taker.getRemainingQuantity();
+
+        while (!simulation.isEmpty() && takerRemaining.compareTo(BigDecimal.ZERO) > 0) {
+            OrderBookEntry maker = simulation.peek();
+
+            boolean priceMatches = (taker.getSide() == OrderSide.BUY)
+                    ? taker.getPrice().compareTo(maker.price()) >= 0
+                    : taker.getPrice().compareTo(maker.price()) <= 0;
+
+            if (!priceMatches) break;
+
+            if (maker.userId().equals(taker.getUserId())) {
+                break;
+            }
+
+            simulation.poll();
+
+            BigDecimal matchedQuantity = takerRemaining.min(maker.remainingQuantity());
+            BigDecimal matchedQuoteAmount = maker.price()
+                    .multiply(matchedQuantity)
+                    .setScale(amountScale, RoundingMode.DOWN);
+
+            boolean isTakerBuy = taker.getSide() == OrderSide.BUY;
+            results.add(new MatchResult(
+                    maker.orderId(),
+                    taker.getId(),
+                    isTakerBuy ? taker.getId() : maker.orderId(),
+                    isTakerBuy ? maker.orderId() : taker.getId(),
+                    maker.userId(),
+                    taker.getUserId(),
+                    isTakerBuy ? taker.getUserId() : maker.userId(),
+                    isTakerBuy ? maker.userId() : taker.getUserId(),
+                    maker.price(),
+                    matchedQuantity,
+                    matchedQuoteAmount
+            ));
+
+            takerRemaining = takerRemaining.subtract(matchedQuantity);
+
+            BigDecimal makerRemaining = maker.remainingQuantity().subtract(matchedQuantity);
+            if (makerRemaining.compareTo(BigDecimal.ZERO) > 0) {
+                simulation.add(new OrderBookEntry(
+                        maker.orderId(), maker.userId(), maker.price(), makerRemaining, maker.sequence()
+                ));
+            }
+        }
+
+        return results;
+    }
+
+    public void applyMatchPlan(Order taker, List<MatchResult> plan) {
+        PriorityQueue<OrderBookEntry> makerQueue = (taker.getSide() == OrderSide.BUY) ? sellQueue : buyQueue;
+
+        for (MatchResult result : plan) {
+            OrderBookEntry matched = makerQueue.stream()
+                    .filter(e -> e.orderId().equals(result.makerOrderId()))
+                    .findFirst()
+                    .orElse(null);
+            if (matched == null) continue;
+
+            makerQueue.remove(matched);
+            BigDecimal remaining = matched.remainingQuantity().subtract(result.quantity());
+            if (remaining.compareTo(BigDecimal.ZERO) > 0) {
+                makerQueue.add(new OrderBookEntry(
+                        matched.orderId(), matched.userId(), matched.price(), remaining, matched.sequence()
+                ));
+            }
+        }
+
+        if (taker.getRemainingQuantity().compareTo(BigDecimal.ZERO) > 0) {
+            add(taker);
+        }
+    }
+
     public void add(Order order) {
         OrderBookEntry entry = OrderBookEntry.from(order);
         if (order.getSide() == OrderSide.BUY) {

@@ -15,19 +15,20 @@ public class MatchingEngine {
 
     private final Map<String, MemoryOrderBook> orderBooks = new ConcurrentHashMap<>();
 
-    public List<MatchResult> match(Market market, Order taker) {
+    public List<MatchResult> planMatch(Market market, Order taker) {
         MemoryOrderBook book = orderBooks.computeIfAbsent(
                 market.getSymbol(),
                 k -> new MemoryOrderBook(market.getAmountScale())
         );
+        return book.planMatch(taker);
+    }
 
-        List<MatchResult> results = book.match(taker);
-
-        if (taker.getRemainingQuantity().compareTo(java.math.BigDecimal.ZERO) > 0) {
-            book.add(taker);
-        }
-
-        return results;
+    public void applyMatchPlan(Market market, Order taker, List<MatchResult> plan) {
+        MemoryOrderBook book = orderBooks.computeIfAbsent(
+                market.getSymbol(),
+                k -> new MemoryOrderBook(market.getAmountScale())
+        );
+        book.applyMatchPlan(taker, plan);
     }
 
     public void cancelOrder(String marketSymbol, Order order) {

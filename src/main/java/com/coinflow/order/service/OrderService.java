@@ -30,6 +30,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
@@ -160,9 +162,21 @@ public class OrderService {
                         order.getId(), null
                 ));
 
-                // 매칭 및 정산
-                List<MatchResult> matchResults = matchingEngine.match(market, order);
-                List<Trade> trades = settle(market, order, matchResults);
+                // 매칭 계획 수립 (큐 미변경), 정산
+                List<MatchResult> plan = matchingEngine.planMatch(market, order);
+                List<Trade> trades = settle(market, order, plan);
+
+                // 커밋 성공 후 오더북 반영 — DB 롤백 시 큐는 그대로
+                TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                    @Override
+                    public void afterCommit() {
+                        try {
+                            matchingEngine.applyMatchPlan(market, order, plan);
+                        } catch (Exception e) {
+                            log.error("오더북 applyMatchPlan 실패: orderId={}, 서버 재시작 또는 DB 체결 내역으로 오더북 재구성 필요", order.getId(), e);
+                        }
+                    }
+                });
 
                 return CreateOrderResponse.of(order, trades);
             });
@@ -209,6 +223,10 @@ public class OrderService {
         }
     }
 
+    public ReentrantLock getMarketLock(Long marketId) {
+        return marketLocks.computeIfAbsent(marketId, k -> new ReentrantLock());
+    }
+
     @Transactional(readOnly = true)
     public OrderDetailResponse getOrder(Long currentUserId, Long orderId) {
         Order order = orderRepository.findByIdAndUserId(orderId, currentUserId)
@@ -230,7 +248,10 @@ public class OrderService {
         List<Trade> trades = new ArrayList<>();
 
         for (MatchResult result : matchResults) {
-            Order maker = orderRepository.findById(result.makerOrderId()).orElseThrow();
+            Order maker = orderRepository.findByIdWithLock(result.makerOrderId()).orElseThrow();
+            if (!maker.isCancelable()) {
+                throw new ApiException(ErrorCode.ORDER_NOT_FOUND);
+            }
 
             boolean takerIsBuy = taker.getSide() == OrderSide.BUY;
             Order buyOrder = takerIsBuy ? taker : maker;
