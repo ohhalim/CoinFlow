@@ -1,5 +1,10 @@
 package com.coinflow.wallet.service;
 
+import com.coinflow.common.exception.ApiException;
+import com.coinflow.common.exception.ErrorCode;
+import com.coinflow.wallet.domain.LedgerType;
+import com.coinflow.wallet.domain.WalletLedger;
+import com.coinflow.wallet.dto.DepositRequest;
 import com.coinflow.wallet.dto.WalletLedgerResponse;
 import com.coinflow.wallet.dto.WalletResponse;
 import com.coinflow.wallet.repository.WalletLedgerRepository;
@@ -8,6 +13,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
 import java.util.List;
 
 @Service
@@ -23,6 +29,30 @@ public class WalletService {
                 .stream()
                 .map(WalletResponse::from)
                 .toList();
+    }
+
+    @Transactional
+    public WalletResponse deposit(Long userId, DepositRequest request) {
+        BigDecimal amount;
+        try {
+            amount = new BigDecimal(request.amount());
+        } catch (NumberFormatException e) {
+            throw new ApiException(ErrorCode.INVALID_AMOUNT);
+        }
+        if (amount.compareTo(BigDecimal.ZERO) <= 0) throw new ApiException(ErrorCode.INVALID_AMOUNT);
+
+        var wallet = walletRepository.findByUserIdAndAssetWithLock(userId, request.asset())
+                .orElseThrow(() -> new ApiException(ErrorCode.WALLET_NOT_FOUND));
+
+        wallet.deposit(amount);
+
+        walletLedgerRepository.save(WalletLedger.create(
+                wallet, LedgerType.SEED_DEPOSIT,
+                amount, BigDecimal.ZERO,
+                null, null
+        ));
+
+        return WalletResponse.from(wallet);
     }
 
     @Transactional(readOnly = true)
