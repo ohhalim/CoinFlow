@@ -49,6 +49,10 @@ public class Wallet {
         this.availableBalance = this.availableBalance.add(amount);
     }
 
+    public void consumeLocked(BigDecimal amount) {
+        this.lockedBalance = this.lockedBalance.subtract(amount);
+    }
+
     @PrePersist
     public void prePersist() {
         LocalDateTime now = LocalDateTime.now();

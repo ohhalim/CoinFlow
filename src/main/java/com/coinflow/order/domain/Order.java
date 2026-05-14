@@ -5,6 +5,7 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDateTime;
 
 @Getter
@@ -89,16 +90,21 @@ public class    Order {
     }
 
     public BigDecimal releasableAmount() {
-        if (side == OrderSide.BUY) {
-            return lockedAmount.subtract(executedQuoteAmount);
-        }
-        return remainingQuantity;
+        return lockedAmount;
     }
 
-    public void fill(BigDecimal quantity, BigDecimal quoteAmount) {
+    public void fill(BigDecimal quantity, BigDecimal quoteAmount, int amountScale) {
         this.executedQuantity = this.executedQuantity.add(quantity);
         this.executedQuoteAmount = this.executedQuoteAmount.add(quoteAmount);
         this.remainingQuantity = this.remainingQuantity.subtract(quantity);
+
+        if (this.side == OrderSide.BUY) {
+            this.lockedAmount = (this.remainingQuantity.compareTo(BigDecimal.ZERO) == 0)
+                    ? BigDecimal.ZERO
+                    : this.price.multiply(this.remainingQuantity).setScale(amountScale, RoundingMode.CEILING);
+        } else {
+            this.lockedAmount = this.lockedAmount.subtract(quantity);
+        }
 
         if (this.remainingQuantity.compareTo(BigDecimal.ZERO) == 0) {
             this.status = OrderStatus.FILLED;
@@ -110,6 +116,7 @@ public class    Order {
 
     public void cancel() {
         this.status = OrderStatus.CANCELED;
+        this.lockedAmount = BigDecimal.ZERO;
         this.closedAt = LocalDateTime.now();
     }
 
