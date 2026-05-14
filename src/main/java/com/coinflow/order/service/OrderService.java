@@ -25,17 +25,22 @@ import com.coinflow.wallet.domain.Wallet;
 import com.coinflow.wallet.domain.WalletLedger;
 import com.coinflow.wallet.repository.WalletLedgerRepository;
 import com.coinflow.wallet.repository.WalletRepository;
-import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 
+@Slf4j
 @Service
-@RequiredArgsConstructor
 public class OrderService {
 
     private final MarketRepository marketRepository;
@@ -45,30 +50,46 @@ public class OrderService {
     private final TradeRepository tradeRepository;
     private final WalletLedgerRepository walletLedgerRepository;
     private final MatchingEngine matchingEngine;
+    private final TransactionTemplate transactionTemplate;
 
-    @Transactional
+    private final Map<Long, ReentrantLock> marketLocks = new ConcurrentHashMap<>();
+
+    public OrderService(
+            MarketRepository marketRepository,
+            OrderRepository orderRepository,
+            OrderSequenceRepository orderSequenceRepository,
+            WalletRepository walletRepository,
+            TradeRepository tradeRepository,
+            WalletLedgerRepository walletLedgerRepository,
+            MatchingEngine matchingEngine,
+            PlatformTransactionManager transactionManager
+    ) {
+        this.marketRepository = marketRepository;
+        this.orderRepository = orderRepository;
+        this.orderSequenceRepository = orderSequenceRepository;
+        this.walletRepository = walletRepository;
+        this.tradeRepository = tradeRepository;
+        this.walletLedgerRepository = walletLedgerRepository;
+        this.matchingEngine = matchingEngine;
+        this.transactionTemplate = new TransactionTemplate(transactionManager);
+    }
+
     public CreateOrderResponse createOrder(Long currentUserId, CreateOrderRequest request) {
 
-        // 1. market 조회
+        // 1. market 조회 및 검증
         Market market = marketRepository.findBySymbol(request.market())
                 .orElseThrow(() -> new ApiException(ErrorCode.MARKET_NOT_FOUND));
-
-        // 2. market 상태 검증
         if (!market.isActive()) throw new ApiException(ErrorCode.MARKET_NOT_ACTIVE);
         if (market.isCancelOnly()) throw new ApiException(ErrorCode.MARKET_CANCEL_ONLY);
 
-        // 3. enum 파싱
+        // 2. 파싱 및 정책 검증
         OrderSide side = parseSide(request.side());
         OrderType type = parseType(request.type());
         TimeInForce tif = parseTif(request.timeInForce());
-
-        // 4. price, quantity 파싱
         BigDecimal price    = parseBigDecimal(request.price(),    ErrorCode.INVALID_PRICE);
         BigDecimal quantity = parseBigDecimal(request.quantity(), ErrorCode.INVALID_QUANTITY);
         if (price.compareTo(BigDecimal.ZERO) <= 0)    throw new ApiException(ErrorCode.INVALID_PRICE);
         if (quantity.compareTo(BigDecimal.ZERO) <= 0) throw new ApiException(ErrorCode.INVALID_QUANTITY);
-
-        // 5. 주문 정책 검증
         if (price.remainder(market.getTickSize()).compareTo(BigDecimal.ZERO) != 0)
             throw new ApiException(ErrorCode.INVALID_TICK_SIZE);
         if (quantity.remainder(market.getStepSize()).compareTo(BigDecimal.ZERO) != 0)
@@ -78,81 +99,108 @@ public class OrderService {
         if (price.multiply(quantity).compareTo(market.getMinOrderAmount()) < 0)
             throw new ApiException(ErrorCode.MIN_ORDER_AMOUNT_NOT_MET);
 
-        // 6. clientOrderId 중복 검증
-        if (request.clientOrderId() != null &&
-                orderRepository.existsByUserIdAndClientOrderId(currentUserId, request.clientOrderId())) {
-            throw new ApiException(ErrorCode.DUPLICATE_CLIENT_ORDER_ID);
-        }
-
-        // 7. sequence 발급
-        OrderSequence seq = orderSequenceRepository.findByMarketIdWithLock(market.getId())
-                .orElseThrow(() -> new ApiException(ErrorCode.MARKET_NOT_FOUND));
-        Long sequence = seq.nextSequence();
-
-        // 8. lockedAsset, lockedAmount 계산
         String lockedAsset;
         BigDecimal lockedAmount;
         if (side == OrderSide.BUY) {
             lockedAsset = market.getQuoteAsset();
-            lockedAmount = price.multiply(quantity)
-                    .setScale(market.getAmountScale(), RoundingMode.CEILING);
+            lockedAmount = price.multiply(quantity).setScale(market.getAmountScale(), RoundingMode.CEILING);
         } else {
             lockedAsset = market.getBaseAsset();
             lockedAmount = quantity;
         }
 
-        // 9. wallet lock
-        Wallet wallet = walletRepository.findByUserIdAndAssetWithLock(currentUserId, lockedAsset)
-                .orElseThrow(() -> new ApiException(ErrorCode.INSUFFICIENT_BALANCE));
-        if (wallet.getAvailableBalance().compareTo(lockedAmount) < 0)
-            throw new ApiException(ErrorCode.INSUFFICIENT_BALANCE);
-        wallet.lock(lockedAmount);
+        // 3. 시장별 lock 획득
+        ReentrantLock marketLock = marketLocks.computeIfAbsent(market.getId(), k -> new ReentrantLock());
+        marketLock.lock();
+        try {
+            return transactionTemplate.execute(status -> {
 
-        // 10. order 저장
-        Order order = Order.create(
-                currentUserId, market.getId(), market.getSymbol(),
-                side, type, tif,
-                price, quantity,
-                lockedAsset, lockedAmount,
-                sequence, request.clientOrderId()
-        );
-        orderRepository.save(order);
+                // clientOrderId 중복 검증
+                if (request.clientOrderId() != null &&
+                        orderRepository.existsByUserIdAndClientOrderId(currentUserId, request.clientOrderId())) {
+                    throw new ApiException(ErrorCode.DUPLICATE_CLIENT_ORDER_ID);
+                }
 
-        walletLedgerRepository.save(WalletLedger.create(
-                wallet, LedgerType.ORDER_LOCK,
-                lockedAmount.negate(), lockedAmount,
-                order.getId(), null
-        ));
+                // self-trade 사전 검증 (MAT-006)
+                if (matchingEngine.hasSelfTrade(market.getSymbol(), side, price, currentUserId)) {
+                    throw new ApiException(ErrorCode.SELF_TRADE_NOT_ALLOWED);
+                }
 
-        // 11. 매칭 및 정산
-        List<MatchResult> matchResults = matchingEngine.match(market, order);
-        List<Trade> trades = settle(market, order, matchResults);
+                // sequence 발급
+                OrderSequence seq = orderSequenceRepository.findByMarketIdWithLock(market.getId())
+                        .orElseThrow(() -> new ApiException(ErrorCode.MARKET_NOT_FOUND));
+                Long sequence = seq.nextSequence();
 
-        return CreateOrderResponse.of(order, trades);
+                // wallet lock
+                Wallet wallet = walletRepository.findByUserIdAndAssetWithLock(currentUserId, lockedAsset)
+                        .orElseThrow(() -> new ApiException(ErrorCode.INSUFFICIENT_BALANCE));
+                if (wallet.getAvailableBalance().compareTo(lockedAmount) < 0)
+                    throw new ApiException(ErrorCode.INSUFFICIENT_BALANCE);
+                wallet.lock(lockedAmount);
+
+                // order 저장
+                Order order = Order.create(
+                        currentUserId, market.getId(), market.getSymbol(),
+                        side, type, tif,
+                        price, quantity,
+                        lockedAsset, lockedAmount,
+                        sequence, request.clientOrderId()
+                );
+                orderRepository.save(order);
+
+                // ORDER_LOCK ledger
+                walletLedgerRepository.save(WalletLedger.create(
+                        wallet, LedgerType.ORDER_LOCK,
+                        lockedAmount.negate(), lockedAmount,
+                        order.getId(), null
+                ));
+
+                // 매칭 및 정산
+                List<MatchResult> matchResults = matchingEngine.match(market, order);
+                List<Trade> trades = settle(market, order, matchResults);
+
+                return CreateOrderResponse.of(order, trades);
+            });
+        } finally {
+            marketLock.unlock();
+        }
     }
 
-    @Transactional
     public CancelOrderResponse cancelOrder(Long currentUserId, Long orderId) {
 
+        // lock 획득을 위해 먼저 marketId 조회
         Order order = orderRepository.findByIdAndUserId(orderId, currentUserId)
                 .orElseThrow(() -> new ApiException(ErrorCode.ORDER_NOT_FOUND));
-
         if (!order.isCancelable()) throw new ApiException(ErrorCode.ORDER_NOT_CANCELABLE);
 
-        BigDecimal releaseAmount = order.releasableAmount();
-        Wallet wallet = walletRepository.findByUserIdAndAssetWithLock(currentUserId, order.getLockedAsset())
-                .orElseThrow(() -> new ApiException(ErrorCode.INSUFFICIENT_BALANCE));
-        wallet.unlock(releaseAmount);
-        walletLedgerRepository.save(WalletLedger.create(
-                wallet, LedgerType.ORDER_CANCEL_RELEASE,
-                releaseAmount, releaseAmount.negate(),
-                orderId, null
-        ));
+        ReentrantLock marketLock = marketLocks.computeIfAbsent(order.getMarketId(), k -> new ReentrantLock());
+        marketLock.lock();
+        try {
+            return transactionTemplate.execute(status -> {
 
-        order.cancel();
-        matchingEngine.cancelOrder(order.getMarketSymbol(), order);
+                Order lockedOrder = orderRepository.findByIdAndUserId(orderId, currentUserId)
+                        .orElseThrow(() -> new ApiException(ErrorCode.ORDER_NOT_FOUND));
+                if (!lockedOrder.isCancelable()) throw new ApiException(ErrorCode.ORDER_NOT_CANCELABLE);
 
-        return CancelOrderResponse.of(order, order.getLockedAsset(), releaseAmount.toPlainString());
+                BigDecimal releaseAmount = lockedOrder.releasableAmount();
+                Wallet wallet = walletRepository.findByUserIdAndAssetWithLock(currentUserId, lockedOrder.getLockedAsset())
+                        .orElseThrow(() -> new ApiException(ErrorCode.INSUFFICIENT_BALANCE));
+                wallet.unlock(releaseAmount);
+
+                walletLedgerRepository.save(WalletLedger.create(
+                        wallet, LedgerType.ORDER_CANCEL_RELEASE,
+                        releaseAmount, releaseAmount.negate(),
+                        orderId, null
+                ));
+
+                lockedOrder.cancel();
+                matchingEngine.cancelOrder(lockedOrder.getMarketSymbol(), lockedOrder);
+
+                return CancelOrderResponse.of(lockedOrder, lockedOrder.getLockedAsset(), releaseAmount.toPlainString());
+            });
+        } finally {
+            marketLock.unlock();
+        }
     }
 
     @Transactional(readOnly = true)
@@ -178,21 +226,16 @@ public class OrderService {
         for (MatchResult result : matchResults) {
             Order maker = orderRepository.findById(result.makerOrderId()).orElseThrow();
 
-            // maker, taker order 수량 업데이트
             maker.fill(result.quantity(), result.quoteAmount());
             taker.fill(result.quantity(), result.quoteAmount());
 
-            // 정산: BUY 유저 → baseAsset 지급, SELL 유저 → quoteAsset 지급
-            Wallet buyerBaseWallet  = walletRepository.findByUserIdAndAssetWithLock(result.buyUserId(),  market.getBaseAsset()).orElseThrow();
+            Wallet buyerBaseWallet   = walletRepository.findByUserIdAndAssetWithLock(result.buyUserId(),  market.getBaseAsset()).orElseThrow();
             Wallet sellerQuoteWallet = walletRepository.findByUserIdAndAssetWithLock(result.sellUserId(), market.getQuoteAsset()).orElseThrow();
             Wallet sellerBaseWallet  = walletRepository.findByUserIdAndAssetWithLock(result.sellUserId(), market.getBaseAsset()).orElseThrow();
             Wallet buyerQuoteWallet  = walletRepository.findByUserIdAndAssetWithLock(result.buyUserId(),  market.getQuoteAsset()).orElseThrow();
 
-            // BUY 유저: quoteAsset locked 소진 + baseAsset 지급
             buyerQuoteWallet.unlock(result.quoteAmount());
             buyerBaseWallet.deposit(result.quantity());
-
-            // SELL 유저: baseAsset locked 소진 + quoteAsset 지급
             sellerBaseWallet.unlock(result.quantity());
             sellerQuoteWallet.deposit(result.quoteAmount());
 
