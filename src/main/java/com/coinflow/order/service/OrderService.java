@@ -17,6 +17,7 @@ import com.coinflow.order.dto.OrderSummaryResponse;
 import com.coinflow.event.service.DomainEventRecorder;
 import com.coinflow.order.matching.MatchResult;
 import com.coinflow.order.matching.MatchingEngine;
+import com.coinflow.order.matching.OrderBookRecoveryService;
 import com.coinflow.order.repository.OrderRepository;
 import com.coinflow.order.repository.OrderSequenceRepository;
 import com.coinflow.trade.domain.Trade;
@@ -38,8 +39,10 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -54,6 +57,7 @@ public class OrderService {
     private final TradeRepository tradeRepository;
     private final WalletLedgerRepository walletLedgerRepository;
     private final MatchingEngine matchingEngine;
+    private final OrderBookRecoveryService orderBookRecoveryService;
     private final DomainEventRecorder eventRecorder;
     private final TransactionTemplate transactionTemplate;
 
@@ -67,6 +71,7 @@ public class OrderService {
             TradeRepository tradeRepository,
             WalletLedgerRepository walletLedgerRepository,
             MatchingEngine matchingEngine,
+            OrderBookRecoveryService orderBookRecoveryService,
             DomainEventRecorder eventRecorder,
             PlatformTransactionManager transactionManager
     ) {
@@ -77,6 +82,7 @@ public class OrderService {
         this.tradeRepository = tradeRepository;
         this.walletLedgerRepository = walletLedgerRepository;
         this.matchingEngine = matchingEngine;
+        this.orderBookRecoveryService = orderBookRecoveryService;
         this.eventRecorder = eventRecorder;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
@@ -165,7 +171,8 @@ public class OrderService {
 
                 // 매칭 계획 수립 (큐 미변경), 정산
                 List<MatchResult> plan = matchingEngine.planMatch(market, order);
-                List<Trade> trades = settle(market, order, plan);
+                List<Order> autoCanceledMakers = new ArrayList<>();
+                List<Trade> trades = settle(market, order, plan, autoCanceledMakers);
 
                 // 커밋 성공 후 오더북 반영 — DB 롤백 시 큐는 그대로
                 TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
@@ -173,8 +180,11 @@ public class OrderService {
                     public void afterCommit() {
                         try {
                             matchingEngine.applyMatchPlan(market, order, plan);
+                            autoCanceledMakers.forEach(canceledMaker ->
+                                    matchingEngine.cancelOrder(market.getSymbol(), canceledMaker));
                         } catch (Exception e) {
-                            log.error("오더북 applyMatchPlan 실패: orderId={}, 서버 재시작 또는 DB 체결 내역으로 오더북 재구성 필요", order.getId(), e);
+                            log.error("오더북 applyMatchPlan 실패: orderId={}, DB 체결 내역 기반 재빌드 시도", order.getId(), e);
+                            orderBookRecoveryService.rebuildAfterApplyFailure(market.getId());
                         }
                     }
                 });
@@ -198,7 +208,7 @@ public class OrderService {
         try {
             return transactionTemplate.execute(status -> {
 
-                Order lockedOrder = orderRepository.findByIdAndUserId(orderId, currentUserId)
+                Order lockedOrder = orderRepository.findByIdAndUserIdWithLock(orderId, currentUserId)
                         .orElseThrow(() -> new ApiException(ErrorCode.ORDER_NOT_FOUND));
                 if (!lockedOrder.isCancelable()) throw new ApiException(ErrorCode.ORDER_NOT_CANCELABLE);
 
@@ -256,7 +266,7 @@ public class OrderService {
         return orders.stream().map(OrderSummaryResponse::from).toList();
     }
 
-    private List<Trade> settle(Market market, Order taker, List<MatchResult> matchResults) {
+    private List<Trade> settle(Market market, Order taker, List<MatchResult> matchResults, List<Order> autoCanceledMakers) {
         if (matchResults.isEmpty()) return List.of();
 
         List<Trade> trades = new ArrayList<>();
@@ -280,10 +290,21 @@ public class OrderService {
             BigDecimal buyerReleased = oldBuyLocked.subtract(buyOrder.getLockedAmount());
             BigDecimal buyerRefund   = buyerReleased.subtract(result.quoteAmount());
 
-            Wallet buyerBaseWallet   = walletRepository.findByUserIdAndAssetWithLock(result.buyUserId(),  market.getBaseAsset()).orElseThrow();
-            Wallet sellerQuoteWallet = walletRepository.findByUserIdAndAssetWithLock(result.sellUserId(), market.getQuoteAsset()).orElseThrow();
-            Wallet sellerBaseWallet  = walletRepository.findByUserIdAndAssetWithLock(result.sellUserId(), market.getBaseAsset()).orElseThrow();
-            Wallet buyerQuoteWallet  = walletRepository.findByUserIdAndAssetWithLock(result.buyUserId(),  market.getQuoteAsset()).orElseThrow();
+            WalletKey buyerBaseKey = new WalletKey(result.buyUserId(), market.getBaseAsset());
+            WalletKey sellerQuoteKey = new WalletKey(result.sellUserId(), market.getQuoteAsset());
+            WalletKey sellerBaseKey = new WalletKey(result.sellUserId(), market.getBaseAsset());
+            WalletKey buyerQuoteKey = new WalletKey(result.buyUserId(), market.getQuoteAsset());
+            Map<WalletKey, Wallet> wallets = lockWalletsInOrder(
+                    buyerBaseKey,
+                    sellerQuoteKey,
+                    sellerBaseKey,
+                    buyerQuoteKey
+            );
+
+            Wallet buyerBaseWallet   = wallets.get(buyerBaseKey);
+            Wallet sellerQuoteWallet = wallets.get(sellerQuoteKey);
+            Wallet sellerBaseWallet  = wallets.get(sellerBaseKey);
+            Wallet buyerQuoteWallet  = wallets.get(buyerQuoteKey);
 
             buyerQuoteWallet.consumeLocked(buyerReleased);
             if (buyerRefund.compareTo(BigDecimal.ZERO) > 0) {
@@ -331,11 +352,55 @@ public class OrderService {
                     sellOrderId, tradeId
             ));
 
+            // Dust maker 자동 취소 (PRD 9절): 체결 후 남은 수량의 quote value가 0이면 잔여 lock 해제 후 CANCELED
+            if (maker.getRemainingQuantity().signum() > 0) {
+                BigDecimal dustCheck = maker.getPrice()
+                        .multiply(maker.getRemainingQuantity())
+                        .setScale(market.getAmountScale(), RoundingMode.DOWN);
+                if (dustCheck.signum() == 0) {
+                    Wallet makerLockedWallet = takerIsBuy ? sellerBaseWallet : buyerQuoteWallet;
+                    BigDecimal dustRelease = maker.releasableAmount();
+                    makerLockedWallet.unlock(dustRelease);
+                    maker.cancel();
+                    autoCanceledMakers.add(maker);
+                    walletLedgerRepository.save(WalletLedger.create(
+                            makerLockedWallet, LedgerType.ORDER_CANCEL_RELEASE,
+                            dustRelease, dustRelease.negate(),
+                            maker.getId(), tradeId
+                    ));
+                    eventRecorder.recordOrderCanceled(maker, maker.getLockedAsset(), dustRelease.toPlainString());
+                }
+            }
+
             eventRecorder.recordSettlementCompleted(trade);
             trades.add(trade);
         }
 
         return trades;
+    }
+
+    private Map<WalletKey, Wallet> lockWalletsInOrder(WalletKey... keys) {
+        List<WalletKey> sortedKeys = Stream.of(keys)
+                .distinct()
+                .sorted()
+                .toList();
+
+        Map<WalletKey, Wallet> wallets = new HashMap<>();
+        for (WalletKey key : sortedKeys) {
+            Wallet wallet = walletRepository.findByUserIdAndAssetWithLock(key.userId(), key.asset())
+                    .orElseThrow(() -> new ApiException(ErrorCode.WALLET_NOT_FOUND));
+            wallets.put(key, wallet);
+        }
+        return wallets;
+    }
+
+    private record WalletKey(Long userId, String asset) implements Comparable<WalletKey> {
+        @Override
+        public int compareTo(WalletKey other) {
+            int userCompare = this.userId.compareTo(other.userId);
+            if (userCompare != 0) return userCompare;
+            return this.asset.compareTo(other.asset);
+        }
     }
 
     private OrderSide parseSide(String value) {

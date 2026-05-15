@@ -22,9 +22,15 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
     @Query("SELECT o FROM Order o WHERE o.id = :id")
     Optional<Order> findByIdWithLock(@Param("id") Long id);
 
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT o FROM Order o WHERE o.id = :id AND o.userId = :userId")
+    Optional<Order> findByIdAndUserIdWithLock(@Param("id") Long id, @Param("userId") Long userId);
+
     List<Order> findAllByUserIdOrderByCreatedAtDesc(Long userId, Pageable pageable);
 
     List<Order> findAllByUserIdAndMarketSymbolOrderByCreatedAtDesc(Long userId, String marketSymbol, Pageable pageable);
 
     List<Order> findAllByStatusInOrderBySequenceAsc(List<OrderStatus> statuses);
+
+    List<Order> findAllByMarketIdAndStatusInOrderBySequenceAsc(Long marketId, List<OrderStatus> statuses);
 }

@@ -46,6 +46,12 @@ public class MatchingEngine {
         book.add(order);
     }
 
+    public void rebuildBook(Market market, List<Order> orders) {
+        MemoryOrderBook book = new MemoryOrderBook(market.getAmountScale());
+        orders.forEach(book::add);
+        orderBooks.put(market.getSymbol(), book);
+    }
+
     public boolean hasSelfTrade(String marketSymbol, OrderSide side, BigDecimal price, Long userId) {
         MemoryOrderBook book = orderBooks.get(marketSymbol);
         return book != null && book.hasSelfTrade(side, price, userId);
