@@ -1,5 +1,8 @@
 package com.coinflow.trade.api;
 
+import com.coinflow.common.exception.ApiException;
+import com.coinflow.common.exception.ErrorCode;
+import com.coinflow.order.repository.OrderRepository;
 import com.coinflow.trade.dto.FillResponse;
 import com.coinflow.trade.dto.TradeResponse;
 import com.coinflow.trade.repository.TradeRepository;
@@ -25,6 +28,7 @@ import java.util.List;
 public class TradeController {
 
     private final TradeRepository tradeRepository;
+    private final OrderRepository orderRepository;
 
     @GetMapping("/markets/{market}/trades")
     public List<TradeResponse> getTrades(
@@ -41,14 +45,17 @@ public class TradeController {
     public List<FillResponse> getFills(
             @AuthenticationPrincipal Jwt jwt,
             @RequestParam(required = false) String market,
+            @RequestParam(required = false) Long orderId,
             @RequestParam(defaultValue = "0") @Min(0) long lastFillId,
             @RequestParam(defaultValue = "50") @Min(1) @Max(200) int limit
     ) {
         Long userId = Long.parseLong(jwt.getSubject());
+        if (orderId != null) {
+            orderRepository.findByIdAndUserId(orderId, userId)
+                    .orElseThrow(() -> new ApiException(ErrorCode.ORDER_NOT_FOUND));
+        }
         var pageable = PageRequest.of(0, limit);
-        var trades = (market != null)
-                ? tradeRepository.findAllByUserIdAndMarket(userId, market, lastFillId, pageable)
-                : tradeRepository.findAllByUserId(userId, lastFillId, pageable);
+        var trades = tradeRepository.findFills(userId, market, orderId, lastFillId, pageable);
         return trades.stream().map(t -> FillResponse.of(t, userId)).toList();
     }
 }

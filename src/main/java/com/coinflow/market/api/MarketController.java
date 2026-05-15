@@ -11,9 +11,13 @@ import com.coinflow.order.matching.MatchingEngine;
 import com.coinflow.order.matching.OrderBookEntry;
 import com.coinflow.order.service.OrderService;
 import lombok.RequiredArgsConstructor;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
@@ -22,6 +26,7 @@ import java.util.concurrent.locks.ReentrantLock;
 @RestController
 @RequiredArgsConstructor
 @RequestMapping("/api/v1/markets")
+@Validated
 public class MarketController {
 
     private final MarketRepository marketRepository;
@@ -37,7 +42,10 @@ public class MarketController {
     }
 
     @GetMapping("/{market}/orderbook")
-    public OrderBookResponse getOrderBook(@PathVariable String market) {
+    public OrderBookResponse getOrderBook(
+            @PathVariable String market,
+            @RequestParam(defaultValue = "10") @Min(1) @Max(100) int depth
+    ) {
         Market found = marketRepository.findBySymbol(market)
                 .orElseThrow(() -> new ApiException(ErrorCode.MARKET_NOT_FOUND));
 
@@ -46,7 +54,7 @@ public class MarketController {
         try {
             List<OrderBookEntry> buySide  = matchingEngine.getBuySide(market);
             List<OrderBookEntry> sellSide = matchingEngine.getSellSide(market);
-            return OrderBookResponse.of(market, buySide, sellSide);
+            return OrderBookResponse.of(market, buySide, sellSide, depth);
         } finally {
             lock.unlock();
         }
