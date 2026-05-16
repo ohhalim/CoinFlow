@@ -1,8 +1,11 @@
 package com.coinflow.wallet;
 
 import com.coinflow.auth.repository.UserRepository;
+import com.coinflow.event.repository.DomainEventRepository;
 import com.coinflow.order.matching.MatchingEngine;
+import com.coinflow.order.repository.OrderRepository;
 import com.coinflow.support.TestcontainersConfig;
+import com.coinflow.trade.repository.TradeRepository;
 import com.coinflow.wallet.domain.LedgerType;
 import com.coinflow.wallet.domain.Wallet;
 import com.coinflow.wallet.domain.WalletLedger;
@@ -31,11 +34,20 @@ class WalletApiTest {
     @Autowired private UserRepository userRepository;
     @Autowired private WalletRepository walletRepository;
     @Autowired private WalletLedgerRepository walletLedgerRepository;
+    @Autowired private OrderRepository orderRepository;
+    @Autowired private TradeRepository tradeRepository;
+    @Autowired private DomainEventRepository domainEventRepository;
     @Autowired private MatchingEngine matchingEngine;
 
     @BeforeEach
     void setUp() {
         matchingEngine.clearAll();
+        walletLedgerRepository.deleteAll();
+        domainEventRepository.deleteAll();
+        tradeRepository.deleteAll();
+        orderRepository.deleteAll();
+        walletRepository.deleteAll();
+        userRepository.deleteAll();
     }
 
     // ── WAL-001 지갑 조회 ─────────────────────────────────────────────
@@ -97,6 +109,23 @@ class WalletApiTest {
         assertThat(ledgers).isNotEmpty();
         assertThat(ledgers).allMatch(l -> "KRW".equals(l.get("asset")));
     }
+
+    @Test
+    void 원장_조회_limit_적용() {
+        String token = signupAndLogin("wallet003b@example.com");
+        depositKrw("wallet003b@example.com", new BigDecimal("10000000"));
+
+        var createResponse = createOrder(token, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000", "0.0001", null);
+        Long orderId = ((Number) createResponse.getBody().get("orderId")).longValue();
+        cancelOrder(token, orderId);
+        createOrder(token, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000", "0.0001", null);
+
+        var response = getLedgers(token, "KRW", 2);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat((List<?>) response.getBody()).hasSize(2);
+    }
+
 
     // ── LED-001 원장 기록 검증 ────────────────────────────────────────
 
@@ -319,9 +348,21 @@ class WalletApiTest {
     }
 
     private ResponseEntity<List> getLedgers(String token, String asset) {
+        return getLedgers(token, asset, null);
+    }
+
+    private ResponseEntity<List> getLedgers(String token, String asset, Integer limit) {
         HttpHeaders headers = new HttpHeaders();
         headers.setBearerAuth(token);
-        String url = asset != null ? "/api/v1/wallets/ledgers?asset=" + asset : "/api/v1/wallets/ledgers";
-        return restTemplate.exchange(url, HttpMethod.GET, new HttpEntity<>(headers), List.class);
+        StringBuilder url = new StringBuilder("/api/v1/wallets/ledgers");
+        String separator = "?";
+        if (asset != null) {
+            url.append(separator).append("asset=").append(asset);
+            separator = "&";
+        }
+        if (limit != null) {
+            url.append(separator).append("limit=").append(limit);
+        }
+        return restTemplate.exchange(url.toString(), HttpMethod.GET, new HttpEntity<>(headers), List.class);
     }
 }

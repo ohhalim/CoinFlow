@@ -40,4 +40,8 @@ public class Market {
     public boolean isActive() {
         return status == MarketStatus.ACTIVE;
     }
+
+    public void enableCancelOnly() {
+        this.cancelOnly = true;
+    }
 }

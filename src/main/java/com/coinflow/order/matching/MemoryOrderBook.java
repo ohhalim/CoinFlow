@@ -30,14 +30,15 @@ public class MemoryOrderBook {
         this.amountScale = amountScale;
     }
 
-    public List<MatchResult> match(Order taker) {
-        List<MatchResult> results = new ArrayList<>();
+    public List<MatchResult> planMatch(Order taker) {
         PriorityQueue<OrderBookEntry> makerQueue = (taker.getSide() == OrderSide.BUY) ? sellQueue : buyQueue;
+        PriorityQueue<OrderBookEntry> simulation = new PriorityQueue<>(makerQueue);
 
+        List<MatchResult> results = new ArrayList<>();
         BigDecimal takerRemaining = taker.getRemainingQuantity();
 
-        while (!makerQueue.isEmpty() && takerRemaining.compareTo(BigDecimal.ZERO) > 0) {
-            OrderBookEntry maker = makerQueue.peek();
+        while (!simulation.isEmpty() && takerRemaining.compareTo(BigDecimal.ZERO) > 0) {
+            OrderBookEntry maker = simulation.peek();
 
             boolean priceMatches = (taker.getSide() == OrderSide.BUY)
                     ? taker.getPrice().compareTo(maker.price()) >= 0
@@ -45,17 +46,19 @@ public class MemoryOrderBook {
 
             if (!priceMatches) break;
 
-            // self trade 방지
             if (maker.userId().equals(taker.getUserId())) {
                 break;
             }
 
-            makerQueue.poll();
+            simulation.poll();
 
             BigDecimal matchedQuantity = takerRemaining.min(maker.remainingQuantity());
             BigDecimal matchedQuoteAmount = maker.price()
                     .multiply(matchedQuantity)
                     .setScale(amountScale, RoundingMode.DOWN);
+
+            // PRD 9절: zero-quote 체결은 만들지 않고 매칭 중단
+            if (matchedQuoteAmount.signum() == 0) break;
 
             boolean isTakerBuy = taker.getSide() == OrderSide.BUY;
             results.add(new MatchResult(
@@ -76,13 +79,37 @@ public class MemoryOrderBook {
 
             BigDecimal makerRemaining = maker.remainingQuantity().subtract(matchedQuantity);
             if (makerRemaining.compareTo(BigDecimal.ZERO) > 0) {
-                makerQueue.add(new OrderBookEntry(
+                simulation.add(new OrderBookEntry(
                         maker.orderId(), maker.userId(), maker.price(), makerRemaining, maker.sequence()
                 ));
             }
         }
 
         return results;
+    }
+
+    public void applyMatchPlan(Order taker, List<MatchResult> plan) {
+        PriorityQueue<OrderBookEntry> makerQueue = (taker.getSide() == OrderSide.BUY) ? sellQueue : buyQueue;
+
+        for (MatchResult result : plan) {
+            OrderBookEntry matched = makerQueue.stream()
+                    .filter(e -> e.orderId().equals(result.makerOrderId()))
+                    .findFirst()
+                    .orElse(null);
+            if (matched == null) continue;
+
+            makerQueue.remove(matched);
+            BigDecimal remaining = matched.remainingQuantity().subtract(result.quantity());
+            if (remaining.compareTo(BigDecimal.ZERO) > 0) {
+                makerQueue.add(new OrderBookEntry(
+                        matched.orderId(), matched.userId(), matched.price(), remaining, matched.sequence()
+                ));
+            }
+        }
+
+        if (taker.getRemainingQuantity().compareTo(BigDecimal.ZERO) > 0) {
+            add(taker);
+        }
     }
 
     public void add(Order order) {

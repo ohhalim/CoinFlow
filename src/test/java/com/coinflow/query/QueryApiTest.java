@@ -1,9 +1,13 @@
 package com.coinflow.query;
 
 import com.coinflow.auth.repository.UserRepository;
+import com.coinflow.event.repository.DomainEventRepository;
 import com.coinflow.order.matching.MatchingEngine;
+import com.coinflow.order.repository.OrderRepository;
 import com.coinflow.support.TestcontainersConfig;
+import com.coinflow.trade.repository.TradeRepository;
 import com.coinflow.wallet.domain.Wallet;
+import com.coinflow.wallet.repository.WalletLedgerRepository;
 import com.coinflow.wallet.repository.WalletRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -27,11 +31,21 @@ class QueryApiTest {
     @Autowired private TestRestTemplate restTemplate;
     @Autowired private UserRepository userRepository;
     @Autowired private WalletRepository walletRepository;
+    @Autowired private WalletLedgerRepository walletLedgerRepository;
+    @Autowired private OrderRepository orderRepository;
+    @Autowired private TradeRepository tradeRepository;
+    @Autowired private DomainEventRepository domainEventRepository;
     @Autowired private MatchingEngine matchingEngine;
 
     @BeforeEach
     void setUp() {
         matchingEngine.clearAll();
+        walletLedgerRepository.deleteAll();
+        domainEventRepository.deleteAll();
+        tradeRepository.deleteAll();
+        orderRepository.deleteAll();
+        walletRepository.deleteAll();
+        userRepository.deleteAll();
     }
 
     // ── QRY-001 시장 목록 조회 ────────────────────────────────────────
@@ -44,10 +58,12 @@ class QueryApiTest {
         List<Map<?, ?>> markets = (List<Map<?, ?>>) response.getBody();
         assertThat(markets).isNotEmpty();
         assertThat(markets).allMatch(m ->
-                m.containsKey("symbol") &&
+                m.containsKey("market") &&
                 m.containsKey("baseAsset") &&
                 m.containsKey("quoteAsset") &&
+                m.containsKey("amountScale") &&
                 m.containsKey("tickSize") &&
+                m.containsKey("cancelOnly") &&
                 "ACTIVE".equals(m.get("status"))
         );
     }
@@ -103,6 +119,23 @@ class QueryApiTest {
         assertThat(bids.get(0).get("price")).isEqualTo("100000000");
         assertThat(bids.get(1).get("price")).isEqualTo("90000000");
         assertThat(bids.get(2).get("price")).isEqualTo("80000000");
+    }
+
+    @Test
+    void 오더북_같은_가격은_합산하고_depth를_적용() {
+        String token = signupAndLogin("query002b@example.com");
+        depositKrw("query002b@example.com", new BigDecimal("30000"));
+
+        createOrder(token, "BTC-KRW", "BUY", "100000000", "0.0001");
+        createOrder(token, "BTC-KRW", "BUY", "100000000", "0.0001");
+        createOrder(token, "BTC-KRW", "BUY", "90000000", "0.0001");
+
+        var response = restTemplate.getForEntity("/api/v1/markets/BTC-KRW/orderbook?depth=1", Map.class);
+        List<Map<?, ?>> bids = (List<Map<?, ?>>) response.getBody().get("bids");
+
+        assertThat(bids).hasSize(1);
+        assertThat(bids.get(0).get("price")).isEqualTo("100000000");
+        assertThat(bids.get(0).get("quantity")).isEqualTo("0.0002");
     }
 
     // ── QRY-003 체결 내역 조회 ────────────────────────────────────────
@@ -161,8 +194,12 @@ class QueryApiTest {
         List<Map<?, ?>> fills = (List<Map<?, ?>>) buyerFills.getBody();
         assertThat(fills).isNotEmpty();
         Map<?, ?> fill = fills.get(0);
-        assertThat((Map) fill).containsKeys("tradeId", "market", "orderId", "price", "quantity", "liquidity", "tradedAt");
-        assertThat(fill.get("liquidity")).isEqualTo("MAKER");
+        assertThat((Map) fill).containsKeys(
+                "tradeId", "market", "orderId", "side", "price", "quantity", "quoteAmount", "liquidity", "settled", "tradedAt"
+        );
+        assertThat(fill.get("side")).isEqualTo("BUY");
+        assertThat(fill.get("liquidity")).isEqualTo("M");
+        assertThat(fill.get("settled")).isEqualTo(true);
     }
 
     @Test
@@ -179,6 +216,27 @@ class QueryApiTest {
         List<Map<?, ?>> fills = (List<Map<?, ?>>) response.getBody();
         assertThat(fills).isNotEmpty();
         assertThat(fills).allMatch(f -> "BTC-KRW".equals(f.get("market")));
+    }
+
+    @Test
+    void 사용자_fill_조회_orderId_필터() {
+        String buyerToken = signupAndLogin("query006c-buyer@example.com");
+        String sellerToken = signupAndLogin("query006c-seller@example.com");
+        depositKrw("query006c-buyer@example.com", new BigDecimal("20000"));
+        depositBtc("query006c-seller@example.com", new BigDecimal("0.001"));
+
+        var buy1 = createOrder(buyerToken, "BTC-KRW", "BUY", "100000000", "0.0001");
+        Long buyOrderId = ((Number) buy1.getBody().get("orderId")).longValue();
+        createOrder(sellerToken, "BTC-KRW", "SELL", "100000000", "0.0001");
+
+        createOrder(buyerToken, "BTC-KRW", "BUY", "100000000", "0.0001");
+        createOrder(sellerToken, "BTC-KRW", "SELL", "100000000", "0.0001");
+
+        var response = getFills(buyerToken, "BTC-KRW", buyOrderId);
+        List<Map<?, ?>> fills = (List<Map<?, ?>>) response.getBody();
+
+        assertThat(fills).hasSize(1);
+        assertThat(((Number) fills.get(0).get("orderId")).longValue()).isEqualTo(buyOrderId);
     }
 
     @Test
@@ -228,20 +286,32 @@ class QueryApiTest {
         walletRepository.save(wallet);
     }
 
-    private void createOrder(String token, String market, String side, String price, String quantity) {
+    private ResponseEntity<Map> createOrder(String token, String market, String side, String price, String quantity) {
         HttpHeaders headers = new HttpHeaders();
         headers.setBearerAuth(token);
         var body = Map.of(
                 "market", market, "side", side, "type", "LIMIT",
                 "timeInForce", "GTC", "price", price, "quantity", quantity
         );
-        restTemplate.exchange("/api/v1/orders", HttpMethod.POST, new HttpEntity<>(body, headers), Map.class);
+        return restTemplate.exchange("/api/v1/orders", HttpMethod.POST, new HttpEntity<>(body, headers), Map.class);
     }
 
     private ResponseEntity<List> getFills(String token, String market) {
+        return getFills(token, market, null);
+    }
+
+    private ResponseEntity<List> getFills(String token, String market, Long orderId) {
         HttpHeaders headers = new HttpHeaders();
         headers.setBearerAuth(token);
-        String url = market != null ? "/api/v1/fills?market=" + market : "/api/v1/fills";
-        return restTemplate.exchange(url, HttpMethod.GET, new HttpEntity<>(headers), List.class);
+        StringBuilder url = new StringBuilder("/api/v1/fills");
+        String separator = "?";
+        if (market != null) {
+            url.append(separator).append("market=").append(market);
+            separator = "&";
+        }
+        if (orderId != null) {
+            url.append(separator).append("orderId=").append(orderId);
+        }
+        return restTemplate.exchange(url.toString(), HttpMethod.GET, new HttpEntity<>(headers), List.class);
     }
 }

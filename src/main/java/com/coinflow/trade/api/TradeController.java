@@ -1,12 +1,18 @@
 package com.coinflow.trade.api;
 
+import com.coinflow.common.exception.ApiException;
+import com.coinflow.common.exception.ErrorCode;
+import com.coinflow.order.repository.OrderRepository;
 import com.coinflow.trade.dto.FillResponse;
 import com.coinflow.trade.dto.TradeResponse;
 import com.coinflow.trade.repository.TradeRepository;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -18,14 +24,16 @@ import java.util.List;
 @RestController
 @RequiredArgsConstructor
 @RequestMapping("/api/v1")
+@Validated
 public class TradeController {
 
     private final TradeRepository tradeRepository;
+    private final OrderRepository orderRepository;
 
     @GetMapping("/markets/{market}/trades")
     public List<TradeResponse> getTrades(
             @PathVariable String market,
-            @RequestParam(defaultValue = "20") int limit
+            @RequestParam(defaultValue = "20") @Min(1) @Max(100) int limit
     ) {
         return tradeRepository.findAllByMarketSymbolOrderByTradedAtDesc(market, PageRequest.of(0, limit))
                 .stream()
@@ -36,12 +44,18 @@ public class TradeController {
     @GetMapping("/fills")
     public List<FillResponse> getFills(
             @AuthenticationPrincipal Jwt jwt,
-            @RequestParam(required = false) String market
+            @RequestParam(required = false) String market,
+            @RequestParam(required = false) Long orderId,
+            @RequestParam(defaultValue = "0") @Min(0) long lastFillId,
+            @RequestParam(defaultValue = "50") @Min(1) @Max(200) int limit
     ) {
         Long userId = Long.parseLong(jwt.getSubject());
-        var trades = (market != null)
-                ? tradeRepository.findAllByUserIdAndMarket(userId, market)
-                : tradeRepository.findAllByUserId(userId);
+        if (orderId != null) {
+            orderRepository.findByIdAndUserId(orderId, userId)
+                    .orElseThrow(() -> new ApiException(ErrorCode.ORDER_NOT_FOUND));
+        }
+        var pageable = PageRequest.of(0, limit);
+        var trades = tradeRepository.findFills(userId, market, orderId, lastFillId, pageable);
         return trades.stream().map(t -> FillResponse.of(t, userId)).toList();
     }
 }

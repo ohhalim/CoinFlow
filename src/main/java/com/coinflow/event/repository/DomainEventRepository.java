@@ -9,4 +9,5 @@ import java.util.List;
 public interface DomainEventRepository extends JpaRepository<DomainEvent, Long> {
     List<DomainEvent> findAllByAggregateTypeAndAggregateId(String aggregateType, Long aggregateId);
     List<DomainEvent> findAllByEventType(DomainEventType eventType);
+    List<DomainEvent> findAllByPublishedFalseOrderByIdAsc();
 }

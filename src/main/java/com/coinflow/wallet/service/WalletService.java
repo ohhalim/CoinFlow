@@ -10,6 +10,7 @@ import com.coinflow.wallet.dto.WalletResponse;
 import com.coinflow.wallet.repository.WalletLedgerRepository;
 import com.coinflow.wallet.repository.WalletRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -56,10 +57,11 @@ public class WalletService {
     }
 
     @Transactional(readOnly = true)
-    public List<WalletLedgerResponse> getLedgers(Long userId, String asset) {
+    public List<WalletLedgerResponse> getLedgers(Long userId, String asset, int limit) {
+        var pageable = PageRequest.of(0, limit);
         var ledgers = (asset != null)
-                ? walletLedgerRepository.findAllByUserIdAndAssetOrderByCreatedAtDesc(userId, asset)
-                : walletLedgerRepository.findAllByUserIdOrderByCreatedAtDesc(userId);
+                ? walletLedgerRepository.findAllByUserIdAndAssetOrderByCreatedAtDesc(userId, asset, pageable)
+                : walletLedgerRepository.findAllByUserIdOrderByCreatedAtDesc(userId, pageable);
         return ledgers.stream().map(WalletLedgerResponse::from).toList();
     }
 }

@@ -2,7 +2,13 @@ package com.coinflow.order.repository;
 
 import com.coinflow.order.domain.Order;
 import com.coinflow.order.domain.OrderStatus;
+import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
+
+import org.springframework.data.domain.Pageable;
 
 import java.util.List;
 import java.util.Optional;
@@ -12,9 +18,19 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
 
     Optional<Order> findByIdAndUserId(Long id, Long userId);
 
-    List<Order> findAllByUserIdOrderByCreatedAtDesc(Long userId);
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT o FROM Order o WHERE o.id = :id")
+    Optional<Order> findByIdWithLock(@Param("id") Long id);
 
-    List<Order> findAllByUserIdAndMarketSymbolOrderByCreatedAtDesc(Long userId, String marketSymbol);
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT o FROM Order o WHERE o.id = :id AND o.userId = :userId")
+    Optional<Order> findByIdAndUserIdWithLock(@Param("id") Long id, @Param("userId") Long userId);
+
+    List<Order> findAllByUserIdOrderByCreatedAtDesc(Long userId, Pageable pageable);
+
+    List<Order> findAllByUserIdAndMarketSymbolOrderByCreatedAtDesc(Long userId, String marketSymbol, Pageable pageable);
 
     List<Order> findAllByStatusInOrderBySequenceAsc(List<OrderStatus> statuses);
+
+    List<Order> findAllByMarketIdAndStatusInOrderBySequenceAsc(Long marketId, List<OrderStatus> statuses);
 }

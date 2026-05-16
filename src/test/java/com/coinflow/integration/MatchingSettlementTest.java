@@ -1,9 +1,13 @@
 package com.coinflow.integration;
 
 import com.coinflow.auth.repository.UserRepository;
+import com.coinflow.event.repository.DomainEventRepository;
 import com.coinflow.order.matching.MatchingEngine;
+import com.coinflow.order.repository.OrderRepository;
 import com.coinflow.support.TestcontainersConfig;
+import com.coinflow.trade.repository.TradeRepository;
 import com.coinflow.wallet.domain.Wallet;
+import com.coinflow.wallet.repository.WalletLedgerRepository;
 import com.coinflow.wallet.repository.WalletRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -27,10 +31,20 @@ class MatchingSettlementTest {
     @Autowired private TestRestTemplate restTemplate;
     @Autowired private UserRepository userRepository;
     @Autowired private WalletRepository walletRepository;
+    @Autowired private WalletLedgerRepository walletLedgerRepository;
+    @Autowired private TradeRepository tradeRepository;
+    @Autowired private OrderRepository orderRepository;
+    @Autowired private DomainEventRepository domainEventRepository;
     @Autowired private MatchingEngine matchingEngine;
 
     @BeforeEach
     void setUp() {
+        domainEventRepository.deleteAllInBatch();
+        walletLedgerRepository.deleteAllInBatch();
+        tradeRepository.deleteAllInBatch();
+        orderRepository.deleteAllInBatch();
+        walletRepository.deleteAllInBatch();
+        userRepository.deleteAllInBatch();
         matchingEngine.clearAll();
     }
 
@@ -261,6 +275,49 @@ class MatchingSettlementTest {
         var seller2 = userRepository.findByEmail("mat001-seller2@example.com").orElseThrow();
         assertThat(findWallet(seller1.getId(), "KRW").getAvailableBalance()).isEqualByComparingTo("0");
         assertThat(findWallet(seller2.getId(), "KRW").getAvailableBalance()).isEqualByComparingTo("0");
+    }
+
+    // ── DUST_MAKER_001: 체결 후 zero-quote dust maker 자동 취소 ─────────
+    // SELL 1.0001 BTC at 9999 KRW → buyer1 BUY 1.0 체결 → seller 잔여 0.0001 BTC
+    // 9999 × 0.0001 = 0.9999 → DOWN(amountScale=0) = 0 → 잔여 주문 취소 + lock release
+
+    @Test
+    void DUST_MAKER_001_체결_후_zero_quote_잔량은_자동_취소되고_lock이_해제됨() {
+        String sellerToken = signupAndLogin("zq001-seller@example.com");
+        String buyer1Token = signupAndLogin("zq001-buyer1@example.com");
+        String buyer2Token = signupAndLogin("zq001-buyer2@example.com");
+        depositBtc("zq001-seller@example.com", new BigDecimal("2"));
+        depositKrw("zq001-buyer1@example.com", new BigDecimal("20000"));
+        depositKrw("zq001-buyer2@example.com", new BigDecimal("200000"));
+
+        // maker: SELL 1.0001 BTC at 9999 (minOrderAmount: 9999*1.0001=9999.9999 ≥ 5000 ✓)
+        var sellResponse = createOrder(sellerToken, "BTC-KRW", "SELL", "LIMIT", "GTC", "9999", "1.0001", null);
+        Long sellOrderId = ((Number) sellResponse.getBody().get("orderId")).longValue();
+
+        // buyer1: BUY 1.0 BTC at 9999 → partial fill, seller 잔여 0.0001 BTC
+        var buyer1Response = createOrder(buyer1Token, "BTC-KRW", "BUY", "LIMIT", "GTC", "9999", "1.0000", null);
+        assertThat(buyer1Response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(buyer1Response.getBody().get("status")).isEqualTo("FILLED");
+
+        var sellerOrder = orderRepository.findById(sellOrderId).orElseThrow();
+        assertThat(sellerOrder.getStatus().name()).isEqualTo("CANCELED");
+
+        var seller = userRepository.findByEmail("zq001-seller@example.com").orElseThrow();
+        assertThat(findWallet(seller.getId(), "BTC").getAvailableBalance())
+                .isEqualByComparingTo("1.0000");
+        assertThat(findWallet(seller.getId(), "BTC").getLockedBalance())
+                .isEqualByComparingTo("0");
+        assertThat(matchingEngine.getSellSide("BTC-KRW")).isEmpty();
+
+        long tradeCountBefore = tradeRepository.count();
+
+        // buyer2: 남은 SELL이 없으므로 OPEN 등록, 신규 체결 없음
+        var buyer2Response = createOrder(buyer2Token, "BTC-KRW", "BUY", "LIMIT", "GTC", "9999", "10", null);
+        assertThat(buyer2Response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(buyer2Response.getBody().get("status")).isEqualTo("OPEN");
+
+        // buyer2와 신규 체결 없음
+        assertThat(tradeRepository.count()).isEqualTo(tradeCountBefore);
     }
 
     // ── 불변식: wallet 잔고 음수 불가 ────────────────────────────────

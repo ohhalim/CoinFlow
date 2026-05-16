@@ -4,8 +4,11 @@ import com.coinflow.auth.repository.UserRepository;
 import com.coinflow.event.domain.DomainEventType;
 import com.coinflow.event.repository.DomainEventRepository;
 import com.coinflow.order.matching.MatchingEngine;
+import com.coinflow.order.repository.OrderRepository;
 import com.coinflow.support.TestcontainersConfig;
+import com.coinflow.trade.repository.TradeRepository;
 import com.coinflow.wallet.domain.Wallet;
+import com.coinflow.wallet.repository.WalletLedgerRepository;
 import com.coinflow.wallet.repository.WalletRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -29,11 +32,20 @@ class DomainEventTest {
     @Autowired private TestRestTemplate restTemplate;
     @Autowired private UserRepository userRepository;
     @Autowired private WalletRepository walletRepository;
+    @Autowired private WalletLedgerRepository walletLedgerRepository;
+    @Autowired private TradeRepository tradeRepository;
+    @Autowired private OrderRepository orderRepository;
     @Autowired private DomainEventRepository domainEventRepository;
     @Autowired private MatchingEngine matchingEngine;
 
     @BeforeEach
     void setUp() {
+        domainEventRepository.deleteAllInBatch();
+        walletLedgerRepository.deleteAllInBatch();
+        tradeRepository.deleteAllInBatch();
+        orderRepository.deleteAllInBatch();
+        walletRepository.deleteAllInBatch();
+        userRepository.deleteAllInBatch();
         matchingEngine.clearAll();
     }
 
