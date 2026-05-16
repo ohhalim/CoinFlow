@@ -500,7 +500,181 @@ Then:
 - 재빌드 성공 시: 해당 market 오더북이 DB 기준으로 복원되고, 이후 주문 처리가 정상 동작한다.
 - 재빌드 실패 시: 해당 market이 `cancel_only = true`로 전환되고, 신규 주문은 `MARKET_CANCEL_ONLY`를 반환한다.
 
-## 9. Invariants
+## 9. Concurrency
+
+동시성 테스트는 market별 `ReentrantLock`, DB pessimistic lock, 지갑 잔고 불변식, 오더북 스냅샷 안정성을 검증한다.
+
+테스트는 JUnit 5 + Testcontainers MySQL 기반으로 작성한다. 요청 시작 시점을 최대한 맞추기 위해 `ExecutorService`와 `CountDownLatch`를 사용한다.
+
+### CON-001 동일 사용자 동시 BUY 주문
+
+Given:
+
+- buyer KRW available = `100000`
+- 주문 1건당 필요한 lock 금액 = `10000`
+- 동시에 BUY 주문 20건 요청
+
+When:
+
+- 모든 요청을 같은 시점에 시작한다.
+
+Then:
+
+- 성공 주문 수는 최대 10건이다.
+- 실패 요청은 `INSUFFICIENT_BALANCE`로 끝난다.
+- buyer KRW `available_balance`, `locked_balance`는 음수가 되지 않는다.
+- 최종 `available + locked` 합계는 초기 KRW 잔고와 일치한다.
+- `ORDER_LOCK` ledger 수는 성공 주문 수와 일치한다.
+
+### CON-002 하나의 maker 주문에 대한 동시 taker 체결
+
+Given:
+
+- seller가 `SELL price=100000, quantity=0.5` 주문 1건 생성
+- 여러 buyer가 각각 `BUY price=100000, quantity=0.1` 주문을 동시에 요청
+
+When:
+
+- buyer 10명이 동시에 주문을 생성한다.
+
+Then:
+
+- 총 체결 수량은 maker originalQuantity `0.5`를 초과하지 않는다.
+- maker order의 `executedQuantity + remainingQuantity = originalQuantity`가 유지된다.
+- maker order 상태는 `FILLED` 또는 `PARTIALLY_FILLED` 중 최종 수량과 일치한다.
+- seller BTC locked는 음수가 되지 않는다.
+- trade 수량 합계와 주문 executedQuantity가 일치한다.
+
+### CON-003 주문 처리 중 오더북 반복 조회
+
+Given:
+
+- 한 스레드는 주문 생성/체결을 반복한다.
+- 다른 스레드는 `GET /api/v1/markets/BTC-KRW/orderbook`에 해당하는 오더북 조회를 반복한다.
+
+When:
+
+- 두 작업을 동시에 실행한다.
+
+Then:
+
+- `ConcurrentModificationException`이 발생하지 않는다.
+- 오더북 응답에는 `OPEN`, `PARTIALLY_FILLED` 주문만 포함된다.
+- 같은 가격 레벨은 합산 수량으로 응답된다.
+
+### CON-004 주문 취소와 체결 경합
+
+Given:
+
+- buyer maker 주문이 오더북에 `OPEN` 상태로 존재한다.
+- 한 요청은 해당 주문 취소를 시도한다.
+- 다른 요청은 교차되는 SELL taker 주문을 생성한다.
+
+When:
+
+- 취소와 체결 요청을 동시에 시작한다.
+
+Then:
+
+- 주문 최종 상태는 `CANCELED` 또는 `FILLED` 중 하나로 일관된다.
+- `CANCELED`이면 trade가 생성되지 않고 잔여 locked가 해제된다.
+- `FILLED`이면 취소 요청은 `ORDER_NOT_CANCELABLE` 또는 최종 상태에 맞는 에러로 끝난다.
+- 어떤 경우에도 wallet balance와 ledger가 최종 주문 상태와 모순되지 않는다.
+
+### CON-005 반복 실행 기준
+
+동시성 테스트는 타이밍에 민감하므로 단일 성공만으로 충분하지 않다.
+
+- 각 핵심 동시성 테스트는 최소 10회 반복 실행한다.
+- 실패 시 thread별 예외, 성공/실패 응답 수, 최종 wallet/order/trade/ledger 스냅샷을 로그로 남긴다.
+- 테스트가 불안정하면 구현 문제와 테스트 race를 분리하기 위해 seed 데이터와 동시 시작 barrier를 고정한다.
+
+## 10. Local Load Test
+
+k6 부하 테스트는 로컬 환경에서 주문 API와 조회 API의 기본 응답 특성을 기록하기 위한 테스트다. 성능 목표를 과장하지 않고, Phase 1 단일 인스턴스 구현의 현재 기준선을 남기는 데 목적이 있다.
+
+### 실행 전제
+
+- 로컬 MySQL 실행
+- 애플리케이션 실행
+- `prod` 프로필이 아닌 환경에서 dev-only deposit API 사용 가능
+- Kafka/WebSocket/OutboxPublisher는 테스트 범위에 포함하지 않음
+
+```bash
+docker compose up -d mysql
+./gradlew bootRun
+k6 run k6/order-flow-load-test.js
+```
+
+### LOAD-001 주문 생성 중심 시나리오
+
+Scenario:
+
+- 테스트 사용자 회원가입 또는 로그인
+- dev-only deposit API로 KRW/BTC 잔고 준비
+- SELL maker 주문 생성
+- BUY taker 주문 생성
+- 지갑 조회
+- 사용자 fill 조회
+
+Metrics:
+
+- `http_req_failed`
+- `http_req_duration`
+- 주문 생성 p95 응답 시간
+- 5xx 응답 비율
+- 성공한 주문 수와 생성된 trade 수
+
+Threshold:
+
+```javascript
+thresholds: {
+  http_req_failed: ['rate<0.01'],
+  http_req_duration: ['p(95)<1000']
+}
+```
+
+### LOAD-002 조회 API 혼합 시나리오
+
+Scenario:
+
+- 오더북 조회
+- 최근 체결 조회
+- 지갑 조회
+- 원장 조회
+- 사용자 fill 조회
+
+Metrics:
+
+- 조회 API별 p95 응답 시간
+- 5xx 응답 비율
+- 요청 실패율
+
+Threshold:
+
+```javascript
+thresholds: {
+  http_req_failed: ['rate<0.01'],
+  http_req_duration: ['p(95)<500']
+}
+```
+
+### LOAD-003 결과 기록 기준
+
+k6 결과는 숫자 자체보다 변화 추적이 중요하다.
+
+- 실행 날짜
+- branch / commit
+- VU 수와 duration
+- DB와 애플리케이션 실행 환경
+- p95 응답 시간
+- 실패율
+- 5xx 발생 여부
+- 병목으로 추정되는 API
+
+결과는 README에 모두 붙이지 않고, [TEST_RESULTS.md](./TEST_RESULTS.md)에 실행 환경과 수치를 요약한다.
+
+## 11. Invariants
 
 모든 통합 테스트 후 아래 불변식을 검증한다.
 

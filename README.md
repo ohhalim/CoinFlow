@@ -109,7 +109,7 @@ http://localhost:8080/swagger-ui/index.html
 ./gradlew test
 ```
 
-통합 테스트는 Testcontainers 기반 MySQL을 사용해 decimal, foreign key, transaction 경계와 핵심 정합성 시나리오를 실제 MySQL에 가깝게 검증합니다. 동시성 테스트와 부하 테스트는 다음 단계로 분리합니다.
+통합 테스트는 Testcontainers 기반 MySQL을 사용해 decimal, foreign key, transaction 경계와 핵심 정합성 시나리오를 실제 MySQL에 가깝게 검증합니다. 동시성 테스트와 k6 부하 테스트는 [Test Plan](.docs/TestPlan.md)에 계획을 분리해 두고 별도 테스트로 추가합니다.
 
 주요 검증 범위:
 
@@ -126,6 +126,14 @@ http://localhost:8080/swagger-ui/index.html
 - 도메인 이벤트 저장
 - 지갑 잔고 음수 방지
 
+추가 검증 예정 범위:
+
+- 동일 사용자 동시 주문 시 잔고 음수 방지
+- 하나의 maker 주문에 대한 동시 taker 체결 수량 초과 방지
+- 주문 처리 중 오더북 반복 조회 안정성
+- 주문 취소와 체결 경합 시 최종 상태 정합성
+- k6 기반 주문/조회 API 로컬 부하 테스트
+
 ## 문서
 
 | 문서 | 설명 |
@@ -134,19 +142,22 @@ http://localhost:8080/swagger-ui/index.html
 | [Plan](.docs/Plan.md) | MVP 구현 순서와 설계 원칙 |
 | [API](.docs/API.md) | REST API 계약과 에러 코드 |
 | [ERD](.docs/ERD.md) | 테이블 구조와 관계 |
-| [Test Plan](.docs/TestPlan.md) | 핵심 통합 테스트 시나리오 |
+| [Test Plan](.docs/TestPlan.md) | 핵심 통합 테스트, 동시성 테스트, k6 부하 테스트 계획 |
+| [Test Results](.docs/TEST_RESULTS.md) | 동시성/k6 테스트 실행 결과 기록 템플릿 |
 | [Order Flow](.docs/ORDER_FLOW.md) | 주문 생성부터 체결/정산/오더북 반영까지의 내부 흐름 |
 | [Issues](.docs/ISSUES.md) | Phase 1 이후 코드 리뷰 이슈와 보강 내용 |
 | [Reference](.docs/Reference.md) | 설계 판단 근거와 외부 거래소 API 레퍼런스 |
 
 ## 다음 단계
 
-현재 구현 완료 범위는 Phase 1 MVP입니다. 다음 단계에서는 이벤트 발행과 실시간 전파를 별도 이슈로 확장합니다.
+현재 구현 완료 범위는 Phase 1 MVP입니다. 다음 단계에서는 Phase 1 거래 코어의 동시성/부하 테스트를 먼저 추가하고, 이후 이벤트 발행과 실시간 전파를 별도 이슈로 확장합니다.
 
+- JUnit 동시성 테스트 추가
+- k6 주문/조회 로컬 부하 테스트 추가
 - OutboxPublisher 구현
 - `domain_events.published=false` 이벤트 Kafka 발행
 - Kafka 발행 성공/실패 상태와 재시도 횟수 관리
 - Kafka Consumer 기반 WebSocket 체결/오더북 broadcast
-- 정산 Batch와 부하 테스트 추가
+- 정산 Batch 추가
 
 Kafka, WebSocket, Batch 정산은 아직 구현 완료 기능으로 표기하지 않습니다.
