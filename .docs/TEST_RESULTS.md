@@ -16,15 +16,15 @@
 
 | 항목 | 값 |
 |---|---|
-| Date | YYYY-MM-DD |
+| Date | 2026-05-16 |
 | Branch | `chore/32/phase1-concurrency-load-test` |
-| Commit |  |
+| Commit | `9ead967` + working tree |
 | Java | 21 |
 | Spring Boot | 3.5.x |
 | DB | MySQL 8 |
-| Host | local |
+| Host | local (`MacBook-Pro.local`) |
 | CPU / Memory |  |
-| Notes |  |
+| Notes | CON-001, CON-002, and CON-003 added in working tree before commit |
 
 ## 3. JUnit / Integration
 
@@ -38,14 +38,14 @@ Result:
 
 | 항목 | 값 |
 |---|---|
-| Status | Not run |
-| Total tests |  |
-| Failed tests |  |
-| Duration |  |
+| Status | Passed |
+| Total tests | 94 |
+| Failed tests | 0 |
+| Duration | 1m 17s |
 
 Notes:
 
-- TBD
+- Command completed with `BUILD SUCCESSFUL`.
 
 ## 4. Concurrency Test Results
 
@@ -59,39 +59,39 @@ Command:
 
 | 항목 | 값 |
 |---|---|
-| Status | Not run |
-| Threads |  |
-| Repeats |  |
-| Success orders |  |
-| Failed requests |  |
-| Final available |  |
-| Final locked |  |
-| Ledger count |  |
-| Finding |  |
+| Status | Passed |
+| Threads | 20 |
+| Repeats | 10 |
+| Success orders | 10 per repeat |
+| Failed requests | 10 per repeat (`INSUFFICIENT_BALANCE`) |
+| Final available | `0` |
+| Final locked | `100000` |
+| Ledger count | 10 `ORDER_LOCK` entries per repeat |
+| Finding | Concurrent BUY requests did not exceed available KRW and did not create negative balances. |
 
 ### CON-002 하나의 maker 주문에 대한 동시 taker 체결
 
 | 항목 | 값 |
 |---|---|
-| Status | Not run |
-| Taker threads |  |
-| Maker quantity |  |
-| Total traded quantity |  |
-| Maker final status |  |
-| Maker executed quantity |  |
-| Maker remaining quantity |  |
-| Finding |  |
+| Status | Passed |
+| Taker threads | 10 |
+| Maker quantity | `0.5` |
+| Total traded quantity | `0.5` per repeat |
+| Maker final status | `FILLED` |
+| Maker executed quantity | `0.5` |
+| Maker remaining quantity | `0` |
+| Finding | Concurrent taker requests did not trade more than the maker order quantity. |
 
 ### CON-003 주문 처리 중 오더북 반복 조회
 
 | 항목 | 값 |
 |---|---|
-| Status | Not run |
-| Writer threads |  |
-| Reader threads |  |
-| Read attempts |  |
-| Exceptions |  |
-| Finding |  |
+| Status | Passed |
+| Writer threads | 2 |
+| Reader threads | 3 |
+| Read attempts | 60 per repeat |
+| Exceptions | 0 |
+| Finding | Orderbook reads returned HTTP 200 while concurrent order creation updated the in-memory book. |
 
 ### CON-004 주문 취소와 체결 경합
 
