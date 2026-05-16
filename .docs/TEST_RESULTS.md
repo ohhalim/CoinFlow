@@ -24,7 +24,7 @@
 | DB | MySQL 8 |
 | Host | local (`MacBook-Pro.local`) |
 | CPU / Memory |  |
-| Notes | CON-001, CON-002, and CON-003 added in working tree before commit |
+| Notes | CON-001, CON-002, CON-003, and CON-004 added in working tree before commit |
 
 ## 3. JUnit / Integration
 
@@ -39,9 +39,9 @@ Result:
 | 항목 | 값 |
 |---|---|
 | Status | Passed |
-| Total tests | 94 |
+| Total tests | 104 |
 | Failed tests | 0 |
-| Duration | 1m 17s |
+| Duration | 1m 19s |
 
 Notes:
 
@@ -97,11 +97,11 @@ Command:
 
 | 항목 | 값 |
 |---|---|
-| Status | Not run |
-| Repeats |  |
-| Final statuses observed |  |
-| Invariant violations |  |
-| Finding |  |
+| Status | Passed |
+| Repeats | 10 |
+| Final statuses observed | `CANCELED` or `FILLED` depending on race winner |
+| Invariant violations | 0 |
+| Finding | Cancel/fill race ended in one terminal maker state without negative wallet balances or overfilled quantity. |
 
 ## 5. k6 Load Test Results
 

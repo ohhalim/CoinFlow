@@ -288,6 +288,117 @@ class ConcurrencyIntegrationTest {
         }
     }
 
+    @RepeatedTest(10)
+    void CON_004_주문_취소와_체결_경합은_최종_상태와_잔고가_일관된다() throws Exception {
+        String buyerEmail = "con004-buyer@example.com";
+        String buyerToken = signupAndLogin(buyerEmail);
+        depositKrw(buyerEmail, new BigDecimal("50000"));
+
+        String sellerEmail = "con004-seller@example.com";
+        String sellerToken = signupAndLogin(sellerEmail);
+        depositBtc(sellerEmail, new BigDecimal("0.5"));
+
+        var makerResponse = createOrder(
+                buyerToken,
+                "BTC-KRW",
+                "BUY",
+                "LIMIT",
+                "GTC",
+                "100000",
+                "0.5",
+                "con004-maker"
+        );
+        assertThat(makerResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        Long makerOrderId = ((Number) makerResponse.getBody().get("orderId")).longValue();
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+
+        try {
+            Future<ResponseEntity<Map>> cancelFuture = executor.submit(() -> {
+                ready.countDown();
+                assertThat(start.await(5, TimeUnit.SECONDS)).isTrue();
+                return cancelOrder(buyerToken, makerOrderId);
+            });
+            Future<ResponseEntity<Map>> takerFuture = executor.submit(() -> {
+                ready.countDown();
+                assertThat(start.await(5, TimeUnit.SECONDS)).isTrue();
+                return createOrder(
+                        sellerToken,
+                        "BTC-KRW",
+                        "SELL",
+                        "LIMIT",
+                        "GTC",
+                        "100000",
+                        "0.5",
+                        "con004-taker"
+                );
+            });
+
+            assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
+            start.countDown();
+
+            ResponseEntity<Map> cancelResponse = cancelFuture.get(10, TimeUnit.SECONDS);
+            ResponseEntity<Map> takerResponse = takerFuture.get(10, TimeUnit.SECONDS);
+
+            var makerOrder = orderRepository.findById(makerOrderId).orElseThrow();
+            assertThat(makerOrder.getStatus().name()).isIn("CANCELED", "FILLED");
+            assertThat(makerOrder.getLockedAmount()).isEqualByComparingTo("0");
+            assertThat(makerOrder.getExecutedQuantity().add(makerOrder.getRemainingQuantity()))
+                    .isEqualByComparingTo(makerOrder.getOriginalQuantity());
+
+            var buyer = userRepository.findByEmail(buyerEmail).orElseThrow();
+            var seller = userRepository.findByEmail(sellerEmail).orElseThrow();
+            Wallet buyerKrw = findWallet(buyer.getId(), "KRW");
+            Wallet buyerBtc = findWallet(buyer.getId(), "BTC");
+            Wallet sellerKrw = findWallet(seller.getId(), "KRW");
+            Wallet sellerBtc = findWallet(seller.getId(), "BTC");
+
+            assertWalletNeverNegative(buyerKrw);
+            assertWalletNeverNegative(buyerBtc);
+            assertWalletNeverNegative(sellerKrw);
+            assertWalletNeverNegative(sellerBtc);
+
+            if ("CANCELED".equals(makerOrder.getStatus().name())) {
+                assertThat(cancelResponse.getStatusCode()).isEqualTo(HttpStatus.OK);
+                assertThat(cancelResponse.getBody().get("status")).isEqualTo("CANCELED");
+                assertThat(takerResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+                assertThat(takerResponse.getBody().get("status")).isEqualTo("OPEN");
+                assertThat(tradeRepository.count()).isZero();
+
+                assertThat(buyerKrw.getAvailableBalance()).isEqualByComparingTo("50000");
+                assertThat(buyerKrw.getLockedBalance()).isEqualByComparingTo("0");
+                assertThat(sellerBtc.getAvailableBalance()).isEqualByComparingTo("0");
+                assertThat(sellerBtc.getLockedBalance()).isEqualByComparingTo("0.5");
+                assertThat(matchingEngine.getBuySide("BTC-KRW")).isEmpty();
+                assertThat(matchingEngine.getSellSide("BTC-KRW")).hasSize(1);
+            } else {
+                assertThat(cancelResponse.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+                assertThat(cancelResponse.getBody().get("code")).isEqualTo("ORDER_NOT_CANCELABLE");
+                assertThat(takerResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+                assertThat(takerResponse.getBody().get("status")).isEqualTo("FILLED");
+                assertThat(tradeRepository.count()).isEqualTo(1);
+
+                BigDecimal totalTradedQuantity = tradeRepository.findAll().stream()
+                        .map(trade -> trade.getQuantity())
+                        .reduce(BigDecimal.ZERO, BigDecimal::add);
+                assertThat(totalTradedQuantity).isEqualByComparingTo("0.5");
+                assertThat(buyerKrw.getAvailableBalance()).isEqualByComparingTo("0");
+                assertThat(buyerKrw.getLockedBalance()).isEqualByComparingTo("0");
+                assertThat(buyerBtc.getAvailableBalance()).isEqualByComparingTo("0.5");
+                assertThat(sellerKrw.getAvailableBalance()).isEqualByComparingTo("50000");
+                assertThat(sellerBtc.getAvailableBalance()).isEqualByComparingTo("0");
+                assertThat(sellerBtc.getLockedBalance()).isEqualByComparingTo("0");
+                assertThat(matchingEngine.getBuySide("BTC-KRW")).isEmpty();
+                assertThat(matchingEngine.getSellSide("BTC-KRW")).isEmpty();
+            }
+        } finally {
+            executor.shutdownNow();
+            assertThat(executor.awaitTermination(Duration.ofSeconds(5).toMillis(), TimeUnit.MILLISECONDS)).isTrue();
+        }
+    }
+
     private List<ResponseEntity<Map>> runConcurrently(
             int taskCount,
             ConcurrentOrderTask task
@@ -383,6 +494,17 @@ class ConcurrencyIntegrationTest {
         return restTemplate.exchange("/api/v1/orders", HttpMethod.POST, new HttpEntity<>(body, headers), Map.class);
     }
 
+    private ResponseEntity<Map> cancelOrder(String token, Long orderId) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setBearerAuth(token);
+        return restTemplate.exchange(
+                "/api/v1/orders/" + orderId + "/cancel",
+                HttpMethod.POST,
+                new HttpEntity<>(headers),
+                Map.class
+        );
+    }
+
     private ResponseEntity<Map> getOrderBook() {
         return restTemplate.exchange(
                 "/api/v1/markets/BTC-KRW/orderbook?depth=100",
@@ -390,6 +512,11 @@ class ConcurrencyIntegrationTest {
                 HttpEntity.EMPTY,
                 Map.class
         );
+    }
+
+    private void assertWalletNeverNegative(Wallet wallet) {
+        assertThat(wallet.getAvailableBalance()).isGreaterThanOrEqualTo(BigDecimal.ZERO);
+        assertThat(wallet.getLockedBalance()).isGreaterThanOrEqualTo(BigDecimal.ZERO);
     }
 
     @FunctionalInterface
