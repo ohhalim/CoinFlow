@@ -2,6 +2,7 @@
 
 이 문서는 Phase 1 완료 이후 코드 리뷰에서 발견된 이슈를 심각도 순으로 정리한다.
 Phase 1 BLOCKER 이슈(planMatch/applyMatchPlan, marketLock 재사용, findByIdWithLock, DepositRequest 검증, Pagination)는 [v2/ISSUES.md](./v2/ISSUES.md)에서 모두 수정 완료되었다.
+각 항목의 "현상"은 리뷰 당시 상태이고, 하단 요약 표가 현재 반영 상태다.
 
 ---
 
@@ -102,7 +103,7 @@ if (maker.getRemainingQuantity().signum() > 0) {
 
 ### 현상
 
-`POST /api/v1/wallets/deposit`이 운영 프로필에서도 열려 있다. 인증된 사용자라면 누구나 자신의 지갑 잔액을 직접 증가시킬 수 있다.
+수정 전에는 `POST /api/v1/wallets/deposit`이 운영 프로필에서도 열려 있었다. 인증된 사용자라면 누구나 자신의 지갑 잔액을 직접 증가시킬 수 있는 상태였다.
 
 ### 원인
 
@@ -112,33 +113,27 @@ PRD는 입금을 명시적으로 MVP 제외 범위로 정의한다 (PRD.md line 
 입금, 출금 — 제외 범위
 ```
 
-현재 구현은 seed balance 목적으로 열었지만, 운영 프로필 분리 없이 노출되어 있다.
+초기 구현은 seed balance 목적으로 열었지만, 운영 프로필 분리 없이 노출되어 있었다.
 
 ### 수정
 
-**옵션 A — 완전 제거 (권장)**: 테스트는 Repository/Helper를 통한 seed로 처리한다.
+입금 보조 API를 운영 지갑 조회 컨트롤러와 분리했다.
 
 ```java
-// MatchingSettlementTest.setUp() 패턴으로 대체
-wallet.deposit(amount);
-walletRepository.save(wallet);
-```
-
-**옵션 B — 프로필 가드**:
-
-```java
-@Profile({"local", "dev", "test"})
+@Profile("!prod")
 @RestController
-...
-public class WalletController {
+public class DevWalletController {
     @PostMapping("/deposit")
     public WalletResponse deposit(...) { ... }
 }
 ```
 
-**옵션 C — dev 전용 컨트롤러 분리**: `DevWalletController`를 별도 파일로 분리하고 `@Profile("dev")` 적용.
+운영 기능인 `WalletController`는 조회 API만 담당하고, `DevWalletController`는 `prod` 프로필에서 등록되지 않는다.
 
-어느 방식이든 API 문서(API.md)에 "dev/test only"를 명시한다.
+### 검증
+
+- `DevWalletController`에 `@Profile("!prod")`를 적용했다.
+- [API.md](./API.md)에 개발용 입금 보조 API가 운영 입금/출금 기능이 아니라고 명시했다.
 
 ---
 
@@ -146,65 +141,41 @@ public class WalletController {
 
 ### 4-1. MarketResponse 필드 불일치
 
-API.md 명세와 구현이 다르다.
+API.md 명세와 구현이 달랐다.
 
-| 필드 | API.md | 구현 |
+| 필드 | 수정 전 구현 | 현재 구현 |
 |------|--------|------|
-| 시장 심볼 | `"market"` | `"symbol"` |
-| `amountScale` | 있음 | **없음** |
-| `cancelOnly` | 있음 | **없음** |
-
-```java
-// 수정 전
-public record MarketResponse(String symbol, ...)
-
-// 수정 후
-public record MarketResponse(
-        String market,        // symbol → market
-        String amountScale,   // 추가
-        boolean cancelOnly,   // 추가
-        ...
-)
-```
+| 시장 심볼 | `"symbol"` | `"market"` |
+| `amountScale` | 없음 | 있음 |
+| `cancelOnly` | 없음 | 있음 |
 
 ### 4-2. FillResponse 필드 불일치
 
-| 필드 | API.md | 구현 |
+| 필드 | 수정 전 구현 | 현재 구현 |
 |------|--------|------|
-| `side` | 있음 | **없음** |
-| `settled` | 있음 | **없음** |
-| `liquidity` 값 | `"M"` / `"T"` | `"MAKER"` / `"TAKER"` |
-
-```java
-// 수정 후
-public record FillResponse(
-        ...
-        String side,          // "BUY" / "SELL" 추가
-        String liquidity,     // "MAKER" → "M", "TAKER" → "T"
-        boolean settled,      // 항상 true (동일 트랜잭션 정산)
-        ...
-)
-```
+| `side` | 없음 | 있음 |
+| `settled` | 없음 | 있음 |
+| `liquidity` 값 | `"MAKER"` / `"TAKER"` | `"M"` / `"T"` |
 
 ### 4-3. GET /fills — orderId 필터 없음
 
-API.md는 `orderId` 쿼리 파라미터를 지원한다고 명시한다.
+API.md는 `orderId` 쿼리 파라미터를 지원한다고 명시했지만 구현에 없었다.
 
 ```
-GET /api/v1/fills?market=BTC-KRW&orderId=1001&limit=50
+GET /api/v1/fills?market=BTC-KRW&orderId=1001&lastFillId=0&limit=50
 ```
 
-`TradeController.getFills()`에 `orderId` 파라미터와 Repository 쿼리를 추가한다.
+`TradeController.getFills()`에 `orderId`, `lastFillId`, `limit` 파라미터와 Repository 쿼리를 추가했다.
 
 ### 4-4. GET /wallets/ledgers — limit 파라미터 없음
 
-API.md는 `limit` 파라미터를 명시한다.
+API.md는 `limit` 파라미터를 명시했지만 구현에 없었다.
 
 ```
 GET /api/v1/wallets/ledgers?asset=KRW&limit=50
 ```
 
-`WalletService.getLedgers()`에 `limit`/`offset` 또는 커서 기반 페이지네이션을 추가한다.
+`WalletService.getLedgers()`에 `limit` 기반 페이지네이션을 추가했다.
 
 ---
 
@@ -351,38 +322,27 @@ commit 이후 오더북 반영 중 예외가 발생하면 해당 market의 오�
 재빌드도 실패하면 해당 market을 cancel_only = true로 전환하고 수동 복구를 기다린다.
 ```
 
-### 수정 방향
+### 수정
 
-단기 MVP 수준:
+`OrderBookRecoveryService`를 추가했다.
 
-1. `log.error` + Actuator metric increment (`meterRegistry.counter("orderbook.apply.failure")`)
-2. 수동 트리거용 관리 엔드포인트 추가:
-
-```
-POST /actuator/orderbook/rebuild?marketId=1
-```
-
-중기 (Phase 2):
-
-`ApplicationEventPublisher` + `@Transactional(propagation = REQUIRES_NEW)`으로 분리하여 재빌드 → 실패 시 `cancel_only = true` 업데이트를 별도 트랜잭션으로 처리한다.
+1. `orderbook.apply.failure` metric을 증가시킨다.
+2. `REQUIRES_NEW` 트랜잭션으로 DB의 `OPEN`, `PARTIALLY_FILLED` 주문을 읽어 오더북을 재빌드한다.
+3. 재빌드도 실패하면 별도 트랜잭션에서 해당 market을 `cancel_only = true`로 전환한다.
 
 ---
 
-## Priority 9 — docker-compose Kafka KRaft 불일치 [IMPROVE]
+## Priority 9 — Kafka 로컬 인프라와 앱 미연동 범위 정리 [IMPROVE]
 
 ### 현상
 
-v2/PRD.md는 KRaft(Zookeeper 없음)를 선택 이유로 명시했으나, `docker-compose.yml`은 Zookeeper 기반 Kafka를 사용한다.
-
-또한 `build.gradle`에 Kafka/WebSocket 의존성이 없어 앱 자체는 Kafka 없이 기동한다.
+`docker-compose.yml`에는 Kafka 컨테이너가 있지만, `build.gradle`에는 `spring-kafka`와 WebSocket 의존성이 없다. 애플리케이션 코드는 Kafka producer/consumer나 WebSocket broadcaster를 아직 사용하지 않는다.
 
 ### 수정
 
-v2 구현 시작 시:
-
-1. `docker-compose.yml`에서 Zookeeper 제거, KRaft 모드 Kafka로 교체
-2. `build.gradle`에 `spring-kafka`, `spring-boot-starter-websocket` 추가
-3. v2/PRD.md의 docker-compose 설명과 실제 파일 일치 확인
+1. `docker-compose.yml`의 Kafka는 KRaft 모드로 정리했다.
+2. README와 API/PRD/Plan 문서에서 Kafka/WebSocket은 현재 앱 구현 완료 범위가 아니라 다음 단계임을 명시했다.
+3. Phase 2에서 `spring-kafka`, `spring-boot-starter-websocket`, `OutboxPublisher`, WebSocket broadcaster를 별도 이슈로 추가한다.
 
 ---
 
@@ -398,6 +358,6 @@ v2 구현 시작 시:
 | 6 | cancelOrder row lock | IMPROVE | 수정 완료 |
 | 7 | wallet lock 정렬 | IMPROVE | 수정 완료 |
 | 8 | afterCommit 복구 설계 보강 | IMPROVE | 수정 완료 |
-| 9 | docker-compose KRaft 전환 | IMPROVE | 수정 완료 |
+| 9 | Kafka 로컬 인프라와 앱 미연동 범위 정리 | IMPROVE | 문서 정리 완료 |
 
 위 항목은 현재 리팩토링에서 모두 처리 완료했다.

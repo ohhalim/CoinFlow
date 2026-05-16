@@ -68,7 +68,7 @@
 - post-only 주문
 - iceberg 주문
 - 수수료
-- dust 처리
+- 일반적인 dust 정책
 - refresh token
 - 이메일 인증
 - 비밀번호 재설정
@@ -255,21 +255,22 @@ BUY 주문의 `locked_amount`는 `price * remaining_quantity`를 `markets.amount
 6.  quantity stepSize 검증
 7.  minOrderQuantity / minOrderAmount 검증
 8.  clientOrderId 중복 검증
-9.  order sequence 발급
-10. 메모리 오더북 후보 기준 매칭 후보 목록 생성
-11. 자기 체결 사전 검증 (교차 가능한 후보 중 userId == currentUserId인 주문이 하나라도 있으면 SELF_TRADE_NOT_ALLOWED 반환, 이후 단계 진행 없음)
-12. maker order row lock 및 상태/수량 재검증
-13. 체결에 관련된 모든 wallet 확정 (taker wallet + 확정된 maker들의 wallet)
-14. wallet row lock — (user_id, asset) 오름차순으로 정렬 후 일괄 SELECT FOR UPDATE
-15. taker 잔액 재검증 (lock 후 확인)
-16. taker 자산 lock (available → locked)
-17. order 저장
-18. trade 저장
-19. order 수량/상태 갱신 (FILLED 또는 CANCELED 시 closed_at = now(), lockedAmount = 0)
-20. wallet 정산
-21. wallet ledger 기록
-22. domain event 기록
-23. commit 이후 메모리 오더북 변경
+9.  자기 체결 사전 검증 (교차 가능한 후보 중 userId == currentUserId인 주문이 하나라도 있으면 SELF_TRADE_NOT_ALLOWED 반환, 이후 단계 진행 없음)
+10. order sequence 발급
+11. taker wallet row lock 및 잔액 재검증
+12. taker 자산 lock (available → locked)
+13. order 저장
+14. ORDER_ACCEPTED domain event 기록
+15. ORDER_LOCK wallet ledger 기록
+16. 메모리 오더북 후보 기준 매칭 계획 생성 (큐 미변경)
+17. maker order row lock 및 상태/수량 재검증
+18. 체결에 관련된 buyer/seller wallet을 (user_id, asset) 오름차순으로 lock
+19. trade 저장
+20. order 수량/상태 갱신 (FILLED 또는 CANCELED 시 closed_at = now(), lockedAmount = 0)
+21. wallet 정산
+22. wallet ledger 기록
+23. domain event 기록
+24. commit 이후 메모리 오더북 변경
 ```
 
 ### 7.2 주문 취소
@@ -451,6 +452,12 @@ BUY 주문의 `locked_amount`는 `price * remaining_quantity`를 `markets.amount
 
 주문 취소 등 다른 command의 멱등성이 필요해지면 그때 별도 테이블을 추가한다.
 
+### Dust / fee policy
+
+수수료와 일반적인 dust 정책은 MVP 이후로 둔다.
+
+다만 `quote_amount > 0` DB 제약과 정합성 보호를 위해 zero-quote 체결 방지와 dust maker 잔량 자동 취소는 Phase 1 이후 리뷰 보강으로 반영했다.
+
 ### Event Outbox
 
 MVP에서는 `domain_events`를 내부 이벤트 로그로만 사용한다.
@@ -513,7 +520,7 @@ com.coinflow
 
 ---
 
-## 12. 이력서 문장 후보
+## 12. 구현 성과 요약
 
 - 단일 인스턴스 환경에서 지정가 주문 생성, 자산 잠금, 가격-시간 우선 매칭, 부분/완전 체결, 취소를 포함한 거래소 코어 백엔드 MVP 구현
 - JWT 기반 사용자 식별과 `available/locked` 지갑 모델을 통해 계정별 자산 분리와 주문 잠금을 구현
