@@ -2,7 +2,7 @@
 
 이 문서는 CoinFlow MVP 구현 기준의 MySQL DDL이다.
 
-목표는 회원가입/로그인, 주문 생성, 취소, 매칭, 체결, 정산, 조회 흐름을 단일 인스턴스 환경에서 정합성 있게 구현하는 것이다. 입출금, 수수료, dust, Kafka, Redis, recovery/replay/redrive, 인증 고도화는 MVP 범위에서 제외한다.
+목표는 회원가입/로그인, 주문 생성, 취소, 매칭, 체결, 정산, 조회 흐름을 단일 인스턴스 환경에서 정합성 있게 구현하는 것이다. 입출금, 수수료, 일반적인 dust 정책, Kafka, Redis, recovery/replay/redrive, 인증 고도화는 MVP 범위에서 제외한다. 단, zero-quote 체결 방지와 dust maker 잔량 자동 취소는 DB 제약과 정합성 보호를 위한 Phase 1 이후 보강으로 포함한다.
 
 ## 설계 기준
 
@@ -277,11 +277,7 @@ CREATE TABLE trades (
 -- 8. wallet_ledgers
 -- append-only 원장.
 -- available/locked의 변화량과 변화 후 스냅샷을 같이 저장한다.
--- reference_type/reference_id는 제거. order_id, trade_id FK로만 참조 무결성 보장.
--- API에서 referenceType이 필요하면 아래 규칙으로 파생한다:
---   trade_id IS NOT NULL → TRADE / trade_id
---   order_id IS NOT NULL → ORDER / order_id
---   둘 다 NULL           → SYSTEM / null
+-- reference_type/reference_id는 제거. 현재 API 응답은 order_id, trade_id만 노출한다.
 CREATE TABLE wallet_ledgers (
     id                       BIGINT          NOT NULL AUTO_INCREMENT,
 

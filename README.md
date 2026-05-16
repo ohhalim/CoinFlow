@@ -109,7 +109,7 @@ http://localhost:8080/swagger-ui/index.html
 ./gradlew test
 ```
 
-통합 테스트는 Testcontainers 기반 MySQL을 사용해 decimal, foreign key, transaction lock 동작을 실제 MySQL에 가깝게 검증합니다.
+통합 테스트는 Testcontainers 기반 MySQL을 사용해 decimal, foreign key, transaction 경계와 핵심 정합성 시나리오를 실제 MySQL에 가깝게 검증합니다. 동시성 테스트와 부하 테스트는 다음 단계로 분리합니다.
 
 주요 검증 범위:
 

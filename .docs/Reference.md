@@ -1,8 +1,8 @@
 # CoinFlow MVP Reference
 
-이 문서는 CoinFlow MVP 설계 의도를 설명하고 방어하기 위한 레퍼런스 노트다.
+이 문서는 CoinFlow MVP의 설계 의도와 판단 근거를 정리한 레퍼런스 노트다.
 
-구현 계약은 `PRD.md`, `ERD.md`, `API.md`, `TestPlan.md`가 우선한다. 이 문서는 미팅에서 "왜 이렇게 설계했는가"를 설명하기 위한 배경 자료로 사용한다.
+구현 계약은 `PRD.md`, `ERD.md`, `API.md`, `TestPlan.md`가 우선한다. 이 문서는 주요 설계 선택의 배경과 근거를 보조 설명하기 위해 사용한다.
 
 ---
 
@@ -10,7 +10,7 @@
 
 CoinFlow MVP는 거래소의 모든 기능을 구현하는 프로젝트가 아니라, 지정가 주문 생성, 자산 잠금, 가격-시간 우선 매칭, 체결, 정산, append-only 원장 기록까지 이어지는 거래소 코어 백엔드 정합성을 검증하는 프로젝트다.
 
-그래서 입금/출금, 시장가 주문, 수수료, WebSocket, Kafka, Redis, 서버 분리, replay/recovery는 MVP에서 제외한다. 초기 잔액은 seed wallet balance로 만들고, 그 잔액 안에서 주문-체결-정산 흐름이 깨지지 않는지 검증한다.
+그래서 입금/출금, 시장가 주문, 수수료, WebSocket, Kafka, Redis, 서버 분리, replay/redrive 같은 운영 확장은 MVP에서 제외한다. 초기 잔액은 seed wallet balance와 로컬 개발용 입금 보조 API로 만들고, 그 잔액 안에서 주문-체결-정산 흐름이 깨지지 않는지 검증한다. 개발용 입금 보조 API는 `prod` 프로필에서 제외되며 운영 입금 기능이 아니다.
 
 ---
 
@@ -41,17 +41,18 @@ CoinFlow MVP는 거래소의 모든 기능을 구현하는 프로젝트가 아�
 | DB가 source of truth | 메모리 오더북은 빠른 후보 조회와 호가 조회용 파생 상태다. 장애나 재시작 시 DB의 미체결 주문으로 복구할 수 있어야 한다. |
 | 트랜잭션 commit 이후 메모리 오더북 변경 | DB 저장 실패 후 메모리 오더북만 바뀌는 불일치를 막기 위한 기준이다. |
 | 동일 시장 명령 순차 처리 | 같은 market의 주문 생성/취소/매칭이 동시에 섞이면 체결 순서와 잔량 정합성이 깨질 수 있다. MVP에서는 성능보다 정합성을 우선한다. |
+| zero-quote/dust maker 보강 | 수수료와 일반 dust 정책은 MVP 이후로 두지만, `quote_amount > 0` DB 제약을 지키기 위해 zero-quote 체결 방지와 dust maker 잔량 자동 취소는 정합성 보강으로 처리한다. |
 | `domain_events` 저장 | MVP에서는 내부 이벤트 로그로 사용하고, 이후 outbox/Kafka 확장 시 같은 경계를 사용할 수 있게 한다. |
 | `idempotency_requests` 제외 | 1차는 `client_order_id` unique constraint로 주문 중복을 막는다. 취소 같은 command 재시도까지 멱등하게 만들 때 별도 테이블을 추가한다. |
 | 입금/출금 패키지 제외 | 입출금은 외부 은행/블록체인 연동, 승인/실패/환불, tx id 중복, 보안 정책이 필요한 별도 도메인이다. MVP의 주문-체결-정산 검증 범위와 분리한다. |
 
 ---
 
-## 4. 미팅에서 자주 받을 질문과 답변
+## 4. 주요 설계 질문과 답변
 
 ### Q. 왜 입금/출금을 안 만들었나?
 
-입출금은 단순히 잔액을 더하고 빼는 기능이 아니라 외부 시스템 연동, 승인 상태, 실패 보상, 중복 transaction 처리, 보안 정책까지 포함하는 별도 도메인이다. 이번 MVP는 거래소 코어인 주문-매칭-체결-정산 정합성을 먼저 증명하는 것이 목표라서 seed balance를 사용한다.
+입출금은 단순히 잔액을 더하고 빼는 기능이 아니라 외부 시스템 연동, 승인 상태, 실패 보상, 중복 transaction 처리, 보안 정책까지 포함하는 별도 도메인이다. 이번 MVP는 거래소 코어인 주문-매칭-체결-정산 정합성을 먼저 증명하는 것이 목표라서 seed balance와 `prod` 제외 개발용 입금 보조 API만 사용한다.
 
 ### Q. 왜 지갑과 원장을 분리했나?
 
@@ -117,7 +118,7 @@ FILLED, CANCELED 주문은 오더북에 없음
 | Gate.io | [API v4 Spot Orders](https://www.gate.com/docs/developers/apiv4/en) | `text` client field, `time_in_force`, `open`/`closed`/`cancelled`, `left`, `filled_total`, STP | 주문 상태, 잔량, 체결 누적 금액, client id 설계 참고 |
 | Bitfinex | [New Order](https://docs.bitfinex.com/v1/reference/rest-auth-new-order), [Order Status](https://docs.bitfinex.com/v1/reference/rest-auth-order-status) | `limit`, `market`, `executed_amount`, `remaining_amount`, `is_live`, `is_cancelled` | 주문 조회 응답에서 원수량/체결수량/잔량을 분리하는 근거 |
 
-### 6.2 레퍼런스로 방어할 MVP 설계 포인트
+### 6.2 레퍼런스로 설명할 MVP 설계 포인트
 
 | CoinFlow 설계 포인트 | 외부 레퍼런스에서 반복적으로 확인되는 패턴 |
 |---|---|
@@ -223,4 +224,4 @@ MVP에서는 내부 이벤트 로그이지만, 이후 outbox/Kafka 확장 시 pa
 | 시장가 주문 | 금액 기반 주문, 슬리피지, 잔량, 체결 실패 정책이 필요함 |
 | WebSocket | 주문/체결 정합성 검증 이후 실시간 전파 계층으로 추가 |
 | Kafka/outbox publisher | `domain_events` 기반으로 외부 이벤트 발행 확장 |
-| replay/recovery | append-only ledger와 event log가 쌓인 뒤 별도 검증/복구 기능으로 추가 |
+| replay/redrive | append-only ledger와 event log가 쌓인 뒤 별도 검증/재처리 기능으로 추가 |

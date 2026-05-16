@@ -445,7 +445,7 @@ When:
 Then:
 
 - 로그인 사용자의 ledger만 반환된다.
-- 각 ledger의 `availableAfter`, `lockedAfter`는 wallet 변경 후 값과 일치한다.
+- 각 ledger의 `availableBalanceAfter`, `lockedBalanceAfter`는 wallet 변경 후 값과 일치한다.
 
 ## 8. Startup
 

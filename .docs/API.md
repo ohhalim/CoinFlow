@@ -206,7 +206,7 @@ rounding 후 `trade_quote_amount`가 0이 되는 체결은 만들지 않는다.
 
 ### 2.4 주문 생성 트랜잭션 흐름
 
-주문 생성은 아래 처리를 하나의 트랜잭션 경계 안에서 수행한다.
+주문 생성은 market lock 범위 안에서 DB 변경을 하나의 트랜잭션으로 수행한다. market 조회와 요청값 검증은 트랜잭션 전 사전 검증이고, 주문/체결/정산/원장/이벤트 저장은 같은 트랜잭션에서 처리한다.
 
 ```text
 1.  JWT에서 currentUserId 추출
@@ -217,21 +217,22 @@ rounding 후 `trade_quote_amount`가 0이 되는 체결은 만들지 않는다.
 6.  quantity stepSize 검증
 7.  minOrderQuantity / minOrderAmount 검증
 8.  clientOrderId 중복 검증
-9.  order sequence 발급
-10. 메모리 오더북 후보 기준 매칭 후보 목록 생성
-11. 자기 체결 사전 검증 (교차 가능한 후보 중 userId == currentUserId인 주문이 하나라도 있으면 SELF_TRADE_NOT_ALLOWED 반환, 이후 단계 진행 없음)
-12. maker order row lock 및 상태/수량 재검증
-13. 체결에 관련된 모든 wallet 확정 (taker wallet + 확정된 maker들의 wallet)
-14. wallet row lock — (user_id, asset) 오름차순으로 정렬 후 일괄 SELECT FOR UPDATE
-15. taker 잔액 재검증 (lock 후 확인, 부족 시 INSUFFICIENT_BALANCE 반환)
-16. taker 자산 lock (available → locked)
-17. order 저장
-18. trade 저장
-19. order 수량/상태 갱신 (완전 체결 시 lockedAmount = 0)
-20. wallet 정산
-21. wallet ledger 기록
-22. domain event 기록
-23. commit 이후 메모리 오더북 변경 (시장 lock 범위 안에서 완료)
+9.  자기 체결 사전 검증 (교차 가능한 후보 중 userId == currentUserId인 주문이 하나라도 있으면 SELF_TRADE_NOT_ALLOWED 반환, 이후 단계 진행 없음)
+10. order sequence 발급
+11. taker wallet row lock 및 잔액 재검증
+12. taker 자산 lock (available → locked)
+13. order 저장
+14. ORDER_ACCEPTED domain event 기록
+15. ORDER_LOCK wallet ledger 기록
+16. 메모리 오더북 후보 기준 매칭 계획 생성 (큐 미변경)
+17. maker order row lock 및 상태/수량 재검증
+18. 체결에 관련된 buyer/seller wallet을 (user_id, asset) 오름차순으로 lock
+19. trade 저장
+20. order 수량/상태 갱신 (완전 체결 시 lockedAmount = 0)
+21. wallet 정산
+22. wallet ledger 기록
+23. domain event 기록
+24. commit 이후 메모리 오더북 변경 (시장 lock 범위 안에서 완료)
 ```
 
 ### 2.5 주문 취소 트랜잭션 흐름
@@ -398,14 +399,16 @@ Response:
 ```json
 [
   {
+    "walletId": 1,
     "asset": "KRW",
-    "available": "1000000",
-    "locked": "0"
+    "availableBalance": "1000000",
+    "lockedBalance": "0"
   },
   {
+    "walletId": 2,
     "asset": "BTC",
-    "available": "1.5",
-    "locked": "0"
+    "availableBalance": "1.5",
+    "lockedBalance": "0"
   }
 ]
 ```
@@ -435,10 +438,8 @@ Response:
     "type": "ORDER_LOCK",
     "deltaAvailable": "-5000",
     "deltaLocked": "5000",
-    "availableAfter": "995000",
-    "lockedAfter": "5000",
-    "referenceType": "ORDER",
-    "referenceId": 1001,
+    "availableBalanceAfter": "995000",
+    "lockedBalanceAfter": "5000",
     "orderId": 1001,
     "tradeId": null,
     "createdAt": "2026-04-30T12:31:10.123"
@@ -446,7 +447,39 @@ Response:
 ]
 ```
 
-`referenceType`, `referenceId`는 DB 저장 컬럼이 아니라 응답 파생 필드다. `tradeId`가 있으면 `TRADE`, `orderId`만 있으면 `ORDER`, 둘 다 없으면 `SYSTEM`으로 계산한다.
+`referenceType`, `referenceId`는 저장/응답하지 않는다. 참조 대상은 `orderId`, `tradeId`로 구분한다.
+
+### 5.3 개발용 입금 보조 API
+
+```http
+POST /api/v1/wallets/deposit
+```
+
+인증: 필요
+
+프로필: `!prod`
+
+이 API는 로컬 개발과 테스트 데이터 준비를 위한 보조 기능이다. MVP의 운영 입금/출금 기능이 아니며, `prod` 프로필에서는 컨트롤러가 등록되지 않는다.
+
+Request:
+
+```json
+{
+  "asset": "KRW",
+  "amount": "1000000"
+}
+```
+
+Response:
+
+```json
+{
+  "walletId": 1,
+  "asset": "KRW",
+  "availableBalance": "1000000",
+  "lockedBalance": "0"
+}
+```
 
 ## 6. Orders
 
@@ -497,7 +530,7 @@ Response:
       "price": "9900",
       "quantity": "0.2",
       "quoteAmount": "1980",
-      "liquidity": "T",
+      "liquidity": "TAKER",
       "tradedAt": "2026-04-30T12:31:10.123"
     }
   ]
@@ -512,6 +545,7 @@ Response:
 - `lockedAmount`는 현재 주문 잔량에 대해 남아 있는 잠금 수량/금액이다.
 - 주문 생성 성공은 matching/settlement 처리 후 확정된 상태를 반환한다.
 - 체결이 발생하지 않으면 `trades`는 빈 배열이다.
+- 주문 생성 응답의 `trades[].liquidity`는 생성된 주문 기준으로 `MAKER` 또는 `TAKER`를 반환한다. 일반적으로 새 주문은 taker로 매칭된다.
 - `clientOrderId`는 optional이다. 값이 있으면 동일 사용자 내 중복을 거절한다(`DUPLICATE_CLIENT_ORDER_ID`). 값이 없으면 멱등성을 보장하지 않으며, null 주문 여러 건을 허용한다.
 
 ### 6.2 주문 취소
@@ -592,7 +626,7 @@ Response:
 ### 6.4 주문 목록 조회
 
 ```http
-GET /api/v1/orders?market=BTC-KRW&status=OPEN&limit=50
+GET /api/v1/orders?market=BTC-KRW&limit=50&offset=0
 ```
 
 인증: 필요
@@ -602,8 +636,8 @@ Query:
 | Name | Required | 설명 |
 |---|---|---|
 | `market` | N | 시장 심볼 |
-| `status` | N | 주문 상태 |
 | `limit` | N | 조회 개수, 기본값 50 |
+| `offset` | N | 건너뛸 개수, 기본값 0 |
 
 Response:
 
@@ -687,10 +721,6 @@ Response:
     "price": "9900",
     "quantity": "0.2",
     "quoteAmount": "1980",
-    "buyOrderId": 1001,
-    "sellOrderId": 900,
-    "makerOrderId": 900,
-    "takerOrderId": 1001,
     "tradedAt": "2026-04-30T12:31:10.123"
   }
 ]
@@ -699,7 +729,7 @@ Response:
 ### 8.2 사용자 fill 조회
 
 ```http
-GET /api/v1/fills?market=BTC-KRW&orderId=1001&limit=50
+GET /api/v1/fills?market=BTC-KRW&orderId=1001&lastFillId=0&limit=50
 ```
 
 인증: 필요
@@ -710,6 +740,7 @@ Query:
 |---|---|---|
 | `market` | N | 시장 심볼 |
 | `orderId` | N | 특정 주문의 fill만 조회 |
+| `lastFillId` | N | 이 ID보다 큰 fill만 조회, 기본값 0 |
 | `limit` | N | 조회 개수, 기본값 50 |
 
 Response:
