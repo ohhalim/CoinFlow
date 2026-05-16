@@ -18,13 +18,13 @@
 |---|---|
 | Date | 2026-05-16 |
 | Branch | `chore/32/phase1-concurrency-load-test` |
-| Commit | `9ead967` + working tree |
+| Commit | `22ff339` + working tree |
 | Java | 21 |
 | Spring Boot | 3.5.x |
 | DB | MySQL 8 |
 | Host | local (`MacBook-Pro.local`) |
 | CPU / Memory |  |
-| Notes | CON-001, CON-002, CON-003, and CON-004 added in working tree before commit |
+| Notes | k6 ran against local app + Docker MySQL. Local `mysqld` occupied `127.0.0.1:3306`, so app used Docker MySQL via `[::1]:3306`. |
 
 ## 3. JUnit / Integration
 
@@ -115,41 +115,42 @@ k6 run k6/order-flow-load-test.js
 
 | Metric | Result | Threshold |
 |---|---:|---:|
-| VUs |  |  |
-| Duration |  |  |
-| http_req_failed |  | `< 1%` |
-| http_req_duration p95 |  | `< 1000ms` |
-| 5xx count |  | `0` |
-| Created orders |  |  |
-| Created trades |  |  |
+| VUs | preAllocated 8 / max 20 |  |
+| Duration | 30s |  |
+| http_req_failed | `0.00%` | `< 1%` |
+| http_req_duration p95 | `65.63ms` overall / `64.98ms` order create | `< 1000ms` |
+| 5xx count | `0` | `0` |
+| Created orders | `301` |  |
+| Created trades | `150` |  |
 
 Finding:
 
-- TBD
+- Order creation and matching stayed within threshold with no failed HTTP requests and no 5xx responses.
 
 ### LOAD-002 조회 API 혼합 시나리오
 
 | Metric | Result | Threshold |
 |---|---:|---:|
-| VUs |  |  |
-| Duration |  |  |
-| http_req_failed |  | `< 1%` |
-| http_req_duration p95 |  | `< 500ms` |
-| 5xx count |  | `0` |
+| VUs | preAllocated 8 / max 20 |  |
+| Duration | 30s |  |
+| http_req_failed | `0.00%` | `< 1%` |
+| http_req_duration p95 | `15.81ms` query tagged requests | `< 500ms` |
+| 5xx count | `0` | `0` |
 
 Endpoint breakdown:
 
 | Endpoint | p95 | Error rate | Notes |
 |---|---:|---:|---|
-| `GET /api/v1/markets/{market}/orderbook` |  |  |  |
-| `GET /api/v1/markets/{market}/trades` |  |  |  |
-| `GET /api/v1/wallets` |  |  |  |
-| `GET /api/v1/wallets/ledgers` |  |  |  |
-| `GET /api/v1/fills` |  |  |  |
+| `GET /api/v1/markets` | `14.41ms` | `0.00%` |  |
+| `GET /api/v1/markets/{market}/orderbook` | `25.25ms` | `0.00%` | Highest query p95 in this run |
+| `GET /api/v1/markets/{market}/trades` | `14.20ms` | `0.00%` |  |
+| `GET /api/v1/wallets` | `14.35ms` | `0.00%` |  |
+| `GET /api/v1/wallets/ledgers` | `24.39ms` | `0.00%` |  |
+| `GET /api/v1/fills` | `13.06ms` | `0.00%` |  |
 
 Finding:
 
-- TBD
+- Query mix stayed below the 500ms p95 threshold. No failed HTTP requests or 5xx responses were observed.
 
 ## 6. 발견 이슈
 
@@ -167,4 +168,5 @@ Severity:
 
 | Action | Owner | Status | Link |
 |---|---|---|---|
-|  |  | TODO |  |
+| Add Prometheus/Grafana local observability compose |  | TODO |  |
+| Run longer k6 soak test after observability setup |  | TODO |  |
