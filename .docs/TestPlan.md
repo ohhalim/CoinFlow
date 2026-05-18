@@ -598,10 +598,11 @@ k6 부하 테스트는 로컬 환경에서 주문 API와 조회 API의 기본 �
 - 로컬 MySQL 실행
 - 애플리케이션 실행
 - `prod` 프로필이 아닌 환경에서 dev-only deposit API 사용 가능
-- Kafka/WebSocket/OutboxPublisher는 테스트 범위에 포함하지 않음
+- WebSocket broadcast는 테스트 범위에 포함하지 않음
+- OutboxPublisher는 Kafka 통합 테스트에서 별도 검증하며, k6 기준선에서는 운영 설정에 따라 함께 동작할 수 있음
 
 ```bash
-docker compose up -d mysql
+docker compose up -d mysql kafka
 ./gradlew bootRun
 k6 run k6/order-flow-load-test.js
 ```

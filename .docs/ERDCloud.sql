@@ -205,6 +205,7 @@ CREATE TABLE domain_events (
     published         TINYINT      NOT NULL,
     published_at      DATETIME     NULL,
     publish_attempts  INT          NOT NULL,
+    last_error_message VARCHAR(500) NULL,
 
     created_at        DATETIME     NOT NULL,
 
