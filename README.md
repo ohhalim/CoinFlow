@@ -101,6 +101,23 @@ DB_URL='jdbc:mysql://localhost:3307/coinflow?serverTimezone=Asia/Seoul&character
 http://localhost:8080/swagger-ui/index.html
 ```
 
+### 4. 로컬 모니터링
+
+애플리케이션은 기본 설정으로 `/actuator/prometheus`를 노출합니다. Prometheus와 Grafana는 로컬 `bootRun` 애플리케이션을 `host.docker.internal:8080`으로 scrape합니다.
+
+```bash
+docker compose up -d prometheus grafana
+```
+
+접속 주소:
+
+| 도구 | URL | 기본 계정 |
+|---|---|---|
+| Prometheus | `http://localhost:9090` | - |
+| Grafana | `http://localhost:3000` | `admin` / `admin` |
+
+Grafana에는 `CoinFlow Overview` 대시보드가 자동 등록됩니다.
+
 ## 테스트
 
 전체 테스트는 다음 명령으로 실행합니다.
@@ -109,7 +126,7 @@ http://localhost:8080/swagger-ui/index.html
 ./gradlew test
 ```
 
-통합 테스트는 Testcontainers 기반 MySQL을 사용해 decimal, foreign key, transaction 경계와 핵심 정합성 시나리오를 실제 MySQL에 가깝게 검증합니다. 동시성 테스트와 k6 부하 테스트는 [Test Plan](.docs/TestPlan.md)에 계획을 분리해 두고 별도 테스트로 추가합니다.
+통합 테스트는 Testcontainers 기반 MySQL을 사용해 decimal, foreign key, transaction 경계와 핵심 정합성 시나리오를 실제 MySQL에 가깝게 검증합니다. 동시성 테스트와 k6 부하 테스트는 [Test Plan](.docs/TestPlan.md)에 계획을 분리해 두고, 실행 결과는 [Test Results](.docs/TEST_RESULTS.md)에 기록합니다.
 
 주요 검증 범위:
 
@@ -125,14 +142,17 @@ http://localhost:8080/swagger-ui/index.html
 - 오더북 조회
 - 도메인 이벤트 저장
 - 지갑 잔고 음수 방지
-
-추가 검증 예정 범위:
-
 - 동일 사용자 동시 주문 시 잔고 음수 방지
 - 하나의 maker 주문에 대한 동시 taker 체결 수량 초과 방지
 - 주문 처리 중 오더북 반복 조회 안정성
 - 주문 취소와 체결 경합 시 최종 상태 정합성
 - k6 기반 주문/조회 API 로컬 부하 테스트
+
+k6 로컬 부하 테스트는 애플리케이션 실행 후 다음 명령으로 실행합니다.
+
+```bash
+k6 run k6/order-flow-load-test.js
+```
 
 ## 문서
 
@@ -150,10 +170,9 @@ http://localhost:8080/swagger-ui/index.html
 
 ## 다음 단계
 
-현재 구현 완료 범위는 Phase 1 MVP입니다. 다음 단계에서는 Phase 1 거래 코어의 동시성/부하 테스트를 먼저 추가하고, 이후 이벤트 발행과 실시간 전파를 별도 이슈로 확장합니다.
+현재 구현 완료 범위는 Phase 1 MVP입니다. Phase 1 거래 코어의 동시성/부하 테스트와 로컬 관측 구성까지 추가했으며, 이후 이벤트 발행과 실시간 전파를 별도 이슈로 확장합니다.
 
-- JUnit 동시성 테스트 추가
-- k6 주문/조회 로컬 부하 테스트 추가
+- 장시간 k6 soak 테스트와 Grafana 관측 결과 기록
 - OutboxPublisher 구현
 - `domain_events.published=false` 이벤트 Kafka 발행
 - Kafka 발행 성공/실패 상태와 재시도 횟수 관리

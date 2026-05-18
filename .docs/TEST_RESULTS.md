@@ -168,5 +168,5 @@ Severity:
 
 | Action | Owner | Status | Link |
 |---|---|---|---|
-| Add Prometheus/Grafana local observability compose |  | TODO |  |
+| Add Prometheus/Grafana local observability compose |  | DONE |  |
 | Run longer k6 soak test after observability setup |  | TODO |  |
