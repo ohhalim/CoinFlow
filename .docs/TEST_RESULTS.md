@@ -24,7 +24,7 @@
 | DB | MySQL 8 |
 | Host | local (`MacBook-Pro.local`) |
 | CPU / Memory |  |
-| Notes | k6 ran against local app + Docker MySQL. Local `mysqld` occupied `127.0.0.1:3306`, so app used Docker MySQL via `[::1]:3306`. |
+| Notes | k6 ran against local app + Docker MySQL. Local standard is Docker MySQL exposed as `3306:3306`; stop any locally installed `mysqld` that occupies port `3306`. |
 
 ## 3. JUnit / Integration
 

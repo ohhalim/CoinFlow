@@ -87,11 +87,7 @@ spring.datasource.username=coinflow
 spring.datasource.password=coinflow
 ```
 
-다른 포트를 사용해야 하면 파일을 수정하지 않고 환경 변수로 주입합니다.
-
-```bash
-DB_URL='jdbc:mysql://localhost:3307/coinflow?serverTimezone=Asia/Seoul&characterEncoding=UTF-8' ./gradlew bootRun
-```
+로컬 실행 기준은 Docker MySQL의 `3306:3306` 포트 매핑입니다. 로컬에 직접 설치된 MySQL이 `3306`을 점유하고 있다면 해당 서비스를 중지하고 Docker MySQL을 사용합니다.
 
 ### 3. API 문서
 
