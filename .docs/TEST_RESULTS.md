@@ -108,8 +108,10 @@ Command:
 Command:
 
 ```bash
-k6 run k6/order-flow-load-test.js
+DURATION=30s ORDER_RATE=10 QUERY_RATE=20 BUYER_COUNT=8 SELLER_COUNT=8 k6 run k6/order-flow-load-test.js
 ```
+
+Date: 2026-05-18
 
 ### LOAD-001 주문 생성 중심 시나리오
 
@@ -118,7 +120,7 @@ k6 run k6/order-flow-load-test.js
 | VUs | preAllocated 8 / max 20 |  |
 | Duration | 30s |  |
 | http_req_failed | `0.00%` | `< 1%` |
-| http_req_duration p95 | `65.63ms` overall / `64.98ms` order create | `< 1000ms` |
+| http_req_duration p95 | `76.5ms` overall / `76.71ms` order create | `< 1000ms` |
 | 5xx count | `0` | `0` |
 | Created orders | `301` |  |
 | Created trades | `150` |  |
@@ -134,25 +136,65 @@ Finding:
 | VUs | preAllocated 8 / max 20 |  |
 | Duration | 30s |  |
 | http_req_failed | `0.00%` | `< 1%` |
-| http_req_duration p95 | `15.81ms` query tagged requests | `< 500ms` |
+| http_req_duration p95 | `22.1ms` query tagged requests | `< 500ms` |
 | 5xx count | `0` | `0` |
 
 Endpoint breakdown:
 
 | Endpoint | p95 | Error rate | Notes |
 |---|---:|---:|---|
-| `GET /api/v1/markets` | `14.41ms` | `0.00%` |  |
-| `GET /api/v1/markets/{market}/orderbook` | `25.25ms` | `0.00%` | Highest query p95 in this run |
-| `GET /api/v1/markets/{market}/trades` | `14.20ms` | `0.00%` |  |
-| `GET /api/v1/wallets` | `14.35ms` | `0.00%` |  |
-| `GET /api/v1/wallets/ledgers` | `24.39ms` | `0.00%` |  |
-| `GET /api/v1/fills` | `13.06ms` | `0.00%` |  |
+| `GET /api/v1/markets` | `16.70ms` | `0.00%` |  |
+| `GET /api/v1/markets/{market}/orderbook` | `30.44ms` | `0.00%` | Highest query p95 in this run |
+| `GET /api/v1/markets/{market}/trades` | `20.47ms` | `0.00%` |  |
+| `GET /api/v1/wallets` | `19.69ms` | `0.00%` |  |
+| `GET /api/v1/wallets/ledgers` | `30.25ms` | `0.00%` |  |
+| `GET /api/v1/fills` | `13.76ms` | `0.00%` |  |
 
 Finding:
 
 - Query mix stayed below the 500ms p95 threshold. No failed HTTP requests or 5xx responses were observed.
 
-## 6. 발견 이슈
+## 6. Observability Smoke Results
+
+Date: 2026-05-18
+
+Purpose:
+
+- Prometheus/Grafana 로컬 관측 구성이 실제 애플리케이션 메트릭을 수집하는지 확인한다.
+- Docker MySQL `3306:3306` 기준에서 앱, 테스트, k6 smoke가 함께 동작하는지 확인한다.
+
+Commands:
+
+```bash
+docker compose ps
+docker compose exec -T mysql mysqladmin ping -h localhost -ucoinflow -pcoinflow
+./gradlew test
+DURATION=5s ORDER_RATE=2 QUERY_RATE=4 BUYER_COUNT=2 SELLER_COUNT=2 k6 run k6/order-flow-load-test.js
+```
+
+Result:
+
+| 항목 | 값 |
+|---|---|
+| Docker MySQL | `coinflow-mysql-1`, `3306:3306`, `mysqld is alive` |
+| Prometheus | Ready, `coinflow` target `up` |
+| Grafana | `/api/health` OK |
+| Gradle test | Passed |
+| k6 duration | `5s` |
+| k6 http_req_failed | `0.00%` |
+| k6 http_req_duration p95 | `114.49ms` |
+| k6 query p95 | `38.32ms` |
+| k6 server_errors | `0` |
+| k6 created_orders | `11` |
+| k6 created_trades | `5` |
+| Prometheus query | `sum(rate(http_server_requests_seconds_count[1m])) = 0.6256` |
+
+Finding:
+
+- Local observability stack scraped the running CoinFlow application successfully.
+- Short k6 smoke generated order/query traffic without HTTP failures or 5xx responses.
+
+## 7. 발견 이슈
 
 | ID | Severity | Symptom | Suspected cause | Action |
 |---|---|---|---|---|
@@ -164,7 +206,7 @@ Severity:
 - `MAJOR`: 5xx, lock timeout, 반복 가능한 성능 병목
 - `MINOR`: 문서/로그/테스트 안정성 개선
 
-## 7. 후속 조치
+## 8. 후속 조치
 
 | Action | Owner | Status | Link |
 |---|---|---|---|
