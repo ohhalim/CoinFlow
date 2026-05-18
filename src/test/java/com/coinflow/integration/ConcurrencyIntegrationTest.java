@@ -2,14 +2,17 @@ package com.coinflow.integration;
 
 import com.coinflow.auth.repository.UserRepository;
 import com.coinflow.event.repository.DomainEventRepository;
+import com.coinflow.market.repository.MarketRepository;
 import com.coinflow.order.matching.MatchingEngine;
 import com.coinflow.order.repository.OrderRepository;
+import com.coinflow.support.IntegrityAssertions;
 import com.coinflow.support.TestcontainersConfig;
 import com.coinflow.trade.repository.TradeRepository;
 import com.coinflow.wallet.domain.LedgerType;
 import com.coinflow.wallet.domain.Wallet;
 import com.coinflow.wallet.repository.WalletLedgerRepository;
 import com.coinflow.wallet.repository.WalletRepository;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.RepeatedTest;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -57,6 +60,7 @@ class ConcurrencyIntegrationTest {
     @Autowired private TradeRepository tradeRepository;
     @Autowired private OrderRepository orderRepository;
     @Autowired private DomainEventRepository domainEventRepository;
+    @Autowired private MarketRepository marketRepository;
     @Autowired private MatchingEngine matchingEngine;
 
     @BeforeEach
@@ -68,6 +72,18 @@ class ConcurrencyIntegrationTest {
         walletRepository.deleteAllInBatch();
         userRepository.deleteAllInBatch();
         matchingEngine.clearAll();
+    }
+
+    @AfterEach
+    void assertIntegrity() {
+        new IntegrityAssertions(
+                marketRepository,
+                orderRepository,
+                tradeRepository,
+                walletRepository,
+                walletLedgerRepository,
+                matchingEngine
+        ).assertAll();
     }
 
     @RepeatedTest(10)
@@ -397,6 +413,99 @@ class ConcurrencyIntegrationTest {
             executor.shutdownNow();
             assertThat(executor.awaitTermination(Duration.ofSeconds(5).toMillis(), TimeUnit.MILLISECONDS)).isTrue();
         }
+    }
+
+    @RepeatedTest(10)
+    void CON_005_동일_clientOrderId_동시_주문은_하나만_성공한다() throws Exception {
+        String email = "con005-buyer@example.com";
+        String token = signupAndLogin(email);
+        depositKrw(email, new BigDecimal("1000000"));
+
+        List<ResponseEntity<Map>> responses = runConcurrently(10, index ->
+                createOrder(
+                        token,
+                        "BTC-KRW",
+                        "BUY",
+                        "LIMIT",
+                        "GTC",
+                        "100000000",
+                        "0.0001",
+                        "con005-duplicate"
+                )
+        );
+
+        long successCount = responses.stream()
+                .filter(response -> response.getStatusCode() == HttpStatus.CREATED)
+                .count();
+        long duplicateCount = responses.stream()
+                .filter(response -> response.getStatusCode() == HttpStatus.CONFLICT)
+                .filter(response -> "DUPLICATE_CLIENT_ORDER_ID".equals(response.getBody().get("code")))
+                .count();
+
+        assertThat(successCount).isEqualTo(1);
+        assertThat(duplicateCount).isEqualTo(9);
+        assertThat(orderRepository.count()).isEqualTo(1);
+        assertThat(tradeRepository.count()).isZero();
+
+        var user = userRepository.findByEmail(email).orElseThrow();
+        Wallet krwWallet = findWallet(user.getId(), "KRW");
+        assertThat(krwWallet.getAvailableBalance()).isEqualByComparingTo("990000");
+        assertThat(krwWallet.getLockedBalance()).isEqualByComparingTo("10000");
+
+        long orderLockLedgerCount = walletLedgerRepository.findAllByUserIdOrderByCreatedAtDesc(user.getId()).stream()
+                .filter(ledger -> ledger.getType() == LedgerType.ORDER_LOCK)
+                .count();
+        assertThat(orderLockLedgerCount).isEqualTo(1);
+        assertThat(matchingEngine.getBuySide("BTC-KRW")).hasSize(1);
+    }
+
+    @RepeatedTest(10)
+    void CON_006_동일_주문_동시_취소는_한번만_잔고를_해제한다() throws Exception {
+        String email = "con006-buyer@example.com";
+        String token = signupAndLogin(email);
+        depositKrw(email, new BigDecimal("100000"));
+
+        var createResponse = createOrder(
+                token,
+                "BTC-KRW",
+                "BUY",
+                "LIMIT",
+                "GTC",
+                "100000000",
+                "0.0001",
+                "con006-maker"
+        );
+        assertThat(createResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        Long orderId = ((Number) createResponse.getBody().get("orderId")).longValue();
+
+        List<ResponseEntity<Map>> responses = runConcurrently(10, index -> cancelOrder(token, orderId));
+
+        long successCount = responses.stream()
+                .filter(response -> response.getStatusCode() == HttpStatus.OK)
+                .filter(response -> "CANCELED".equals(response.getBody().get("status")))
+                .count();
+        long notCancelableCount = responses.stream()
+                .filter(response -> response.getStatusCode() == HttpStatus.BAD_REQUEST)
+                .filter(response -> "ORDER_NOT_CANCELABLE".equals(response.getBody().get("code")))
+                .count();
+
+        assertThat(successCount).isEqualTo(1);
+        assertThat(notCancelableCount).isEqualTo(9);
+
+        var order = orderRepository.findById(orderId).orElseThrow();
+        assertThat(order.getStatus().name()).isEqualTo("CANCELED");
+        assertThat(order.getLockedAmount()).isEqualByComparingTo("0");
+
+        var user = userRepository.findByEmail(email).orElseThrow();
+        Wallet krwWallet = findWallet(user.getId(), "KRW");
+        assertThat(krwWallet.getAvailableBalance()).isEqualByComparingTo("100000");
+        assertThat(krwWallet.getLockedBalance()).isEqualByComparingTo("0");
+
+        long cancelLedgerCount = walletLedgerRepository.findAllByUserIdOrderByCreatedAtDesc(user.getId()).stream()
+                .filter(ledger -> ledger.getType() == LedgerType.ORDER_CANCEL_RELEASE)
+                .count();
+        assertThat(cancelLedgerCount).isEqualTo(1);
+        assertThat(matchingEngine.getBuySide("BTC-KRW")).isEmpty();
     }
 
     private List<ResponseEntity<Map>> runConcurrently(
