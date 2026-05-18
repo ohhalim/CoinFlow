@@ -12,6 +12,8 @@ import java.time.LocalDateTime;
 @Table(name = "domain_events")
 public class DomainEvent {
 
+    private static final int MAX_ERROR_MESSAGE_LENGTH = 500;
+
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
@@ -30,6 +32,7 @@ public class DomainEvent {
     private boolean published;
     private LocalDateTime publishedAt;
     private int publishAttempts;
+    private String lastErrorMessage;
 
     private LocalDateTime createdAt;
 
@@ -50,7 +53,28 @@ public class DomainEvent {
         event.payload = payload;
         event.published = false;
         event.publishAttempts = 0;
+        event.lastErrorMessage = null;
         event.createdAt = LocalDateTime.now();
         return event;
+    }
+
+    public void markPublished() {
+        this.published = true;
+        this.publishedAt = LocalDateTime.now();
+        this.lastErrorMessage = null;
+    }
+
+    public void markPublishFailed(String errorMessage) {
+        this.publishAttempts += 1;
+        this.lastErrorMessage = truncate(errorMessage);
+    }
+
+    private String truncate(String value) {
+        if (value == null) {
+            return null;
+        }
+        return value.length() <= MAX_ERROR_MESSAGE_LENGTH
+                ? value
+                : value.substring(0, MAX_ERROR_MESSAGE_LENGTH);
     }
 }
