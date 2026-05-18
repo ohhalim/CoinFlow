@@ -2,8 +2,10 @@ package com.coinflow.wallet;
 
 import com.coinflow.auth.repository.UserRepository;
 import com.coinflow.event.repository.DomainEventRepository;
+import com.coinflow.market.repository.MarketRepository;
 import com.coinflow.order.matching.MatchingEngine;
 import com.coinflow.order.repository.OrderRepository;
+import com.coinflow.support.IntegrityAssertions;
 import com.coinflow.support.TestcontainersConfig;
 import com.coinflow.trade.repository.TradeRepository;
 import com.coinflow.wallet.domain.LedgerType;
@@ -11,6 +13,7 @@ import com.coinflow.wallet.domain.Wallet;
 import com.coinflow.wallet.domain.WalletLedger;
 import com.coinflow.wallet.repository.WalletLedgerRepository;
 import com.coinflow.wallet.repository.WalletRepository;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -37,6 +40,7 @@ class WalletApiTest {
     @Autowired private OrderRepository orderRepository;
     @Autowired private TradeRepository tradeRepository;
     @Autowired private DomainEventRepository domainEventRepository;
+    @Autowired private MarketRepository marketRepository;
     @Autowired private MatchingEngine matchingEngine;
 
     @BeforeEach
@@ -48,6 +52,18 @@ class WalletApiTest {
         orderRepository.deleteAll();
         walletRepository.deleteAll();
         userRepository.deleteAll();
+    }
+
+    @AfterEach
+    void assertIntegrity() {
+        new IntegrityAssertions(
+                marketRepository,
+                orderRepository,
+                tradeRepository,
+                walletRepository,
+                walletLedgerRepository,
+                matchingEngine
+        ).assertAll();
     }
 
     // ── WAL-001 지갑 조회 ─────────────────────────────────────────────

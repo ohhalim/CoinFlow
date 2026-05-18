@@ -2,13 +2,16 @@ package com.coinflow.integration;
 
 import com.coinflow.auth.repository.UserRepository;
 import com.coinflow.event.repository.DomainEventRepository;
+import com.coinflow.market.repository.MarketRepository;
 import com.coinflow.order.matching.MatchingEngine;
 import com.coinflow.order.repository.OrderRepository;
+import com.coinflow.support.IntegrityAssertions;
 import com.coinflow.support.TestcontainersConfig;
 import com.coinflow.trade.repository.TradeRepository;
 import com.coinflow.wallet.domain.Wallet;
 import com.coinflow.wallet.repository.WalletLedgerRepository;
 import com.coinflow.wallet.repository.WalletRepository;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -35,6 +38,7 @@ class MatchingSettlementTest {
     @Autowired private TradeRepository tradeRepository;
     @Autowired private OrderRepository orderRepository;
     @Autowired private DomainEventRepository domainEventRepository;
+    @Autowired private MarketRepository marketRepository;
     @Autowired private MatchingEngine matchingEngine;
 
     @BeforeEach
@@ -46,6 +50,18 @@ class MatchingSettlementTest {
         walletRepository.deleteAllInBatch();
         userRepository.deleteAllInBatch();
         matchingEngine.clearAll();
+    }
+
+    @AfterEach
+    void assertIntegrity() {
+        new IntegrityAssertions(
+                marketRepository,
+                orderRepository,
+                tradeRepository,
+                walletRepository,
+                walletLedgerRepository,
+                matchingEngine
+        ).assertAll();
     }
 
     // ── SET-001: BUY taker 가격차이 환불 ─────────────────────────────
