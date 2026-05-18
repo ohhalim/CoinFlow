@@ -299,9 +299,57 @@ Finding:
 - 3분 동안 주문 생성/조회 혼합 부하가 threshold를 모두 통과했다.
 - HTTP 실패율과 서버 에러는 0으로 관측됐다.
 - Hikari pending connection은 0으로 유지되어 DB 커넥션 대기 병목은 보이지 않았다.
-- 현재 MVP 기준에서는 Kafka/WebSocket 도입 전에 주문/체결/조회 API의 기본 안정성 검증이 완료된 상태로 판단한다.
+- Phase 1 MVP 기준에서는 Kafka/WebSocket 도입 전에 주문/체결/조회 API의 기본 안정성 검증이 완료된 상태로 판단했다.
 
-## 8. 발견 이슈
+## 8. Outbox Publisher / Kafka 발행 검증
+
+Date: 2026-05-18
+
+Context:
+
+| 항목 | 값 |
+|---|---|
+| Issue | `#36` Outbox Publisher 기반 Kafka 이벤트 발행 |
+| Branch | `feat/36/outbox-publisher` |
+| DB | Testcontainers MySQL 8 |
+| Kafka | Embedded Kafka |
+
+Commands:
+
+```bash
+./gradlew test --tests com.coinflow.event.service.OutboxPublisherTest
+./gradlew test --tests com.coinflow.integration.KafkaPublishingIntegrationTest
+./gradlew test
+```
+
+Result:
+
+| 항목 | 값 |
+|---|---:|
+| OutboxPublisher unit tests | Passed, `5` tests |
+| Kafka publishing integration test | Passed, `1` test |
+| Full regression test | Passed |
+| Total tests | `136` |
+| Failed tests | `0` |
+| Full regression duration | `3m 1s` |
+
+Verified scope:
+
+- `domain_events.published=false` 이벤트를 Kafka topic으로 발행한다.
+- 주문 이벤트는 `coinflow.order.events`, 체결/정산 이벤트는 `coinflow.trade.events`로 라우팅한다.
+- Kafka message key는 `marketSymbol`을 사용한다.
+- 발행 성공 시 `published=true`, `published_at`이 기록되고 `last_error_message`가 초기화된다.
+- 발행 실패 시 주문/체결 트랜잭션과 분리되어 `publish_attempts`와 `last_error_message`만 갱신된다.
+- 한 이벤트 발행 실패가 같은 배치의 다음 이벤트 발행을 막지 않는다.
+- `maxAttempts` 이상 실패한 이벤트는 폴링 대상에서 제외되는 쿼리 조건을 사용한다.
+- 주문 체결 후 실제 Embedded Kafka에서 `TRADE_CREATED` 메시지를 수신했다.
+
+Finding:
+
+- Outbox Publisher 추가 후 기존 Phase 1 정합성 테스트가 회귀 없이 통과했다.
+- WebSocket consumer/broadcast는 이번 범위에 포함하지 않고 다음 이슈로 분리한다.
+
+## 9. 발견 이슈
 
 | ID | Severity | Symptom | Suspected cause | Action |
 |---|---|---|---|---|
@@ -313,9 +361,10 @@ Severity:
 - `MAJOR`: 5xx, lock timeout, 반복 가능한 성능 병목
 - `MINOR`: 문서/로그/테스트 안정성 개선
 
-## 9. 후속 조치
+## 10. 후속 조치
 
 | Action | Owner | Status | Link |
 |---|---|---|---|
 | Add Prometheus/Grafana local observability compose |  | DONE |  |
 | Run longer k6 soak test after observability setup |  | DONE |  |
+| Add Outbox Publisher Kafka event publishing |  | DONE |  |

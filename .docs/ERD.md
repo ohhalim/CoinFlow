@@ -324,8 +324,7 @@ CREATE TABLE wallet_ledgers (
 );
 
 -- 9. domain_events
--- MVP에서는 주요 도메인 이벤트 로그로 사용한다.
--- 이후 outbox publisher를 붙이면 published 관련 필드로 발행 상태를 관리할 수 있다.
+-- 주요 도메인 이벤트 로그이자 Kafka 발행을 위한 outbox로 사용한다.
 CREATE TABLE domain_events (
     id               BIGINT       NOT NULL AUTO_INCREMENT,
 
@@ -341,6 +340,7 @@ CREATE TABLE domain_events (
     published        BOOLEAN      NOT NULL DEFAULT FALSE,
     published_at     DATETIME(6)  NULL,
     publish_attempts INT          NOT NULL DEFAULT 0,
+    last_error_message VARCHAR(500) NULL,
 
     created_at       DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
 
