@@ -110,6 +110,28 @@ class OrderApiTest {
     }
 
     @Test
+    void 주문_생성_잔고_부족_실패는_DB_side_effect를_남기지_않는다() {
+        String token = signupAndLogin("order003b@example.com");
+        var user = userRepository.findByEmail("order003b@example.com").orElseThrow();
+        var krwWalletBefore = findWallet(user.getId(), "KRW");
+
+        var response = createOrder(token, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000", "0.0001", null);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody().get("code")).isEqualTo("INSUFFICIENT_BALANCE");
+        assertThat(orderRepository.count()).isZero();
+        assertThat(tradeRepository.count()).isZero();
+        assertThat(walletLedgerRepository.count()).isZero();
+        assertThat(domainEventRepository.count()).isZero();
+
+        var krwWalletAfter = findWallet(user.getId(), "KRW");
+        assertThat(krwWalletAfter.getAvailableBalance()).isEqualByComparingTo(krwWalletBefore.getAvailableBalance());
+        assertThat(krwWalletAfter.getLockedBalance()).isEqualByComparingTo(krwWalletBefore.getLockedBalance());
+        assertThat(matchingEngine.getBuySide("BTC-KRW")).isEmpty();
+        assertThat(matchingEngine.getSellSide("BTC-KRW")).isEmpty();
+    }
+
+    @Test
     void 주문_생성_없는_마켓() {
         String token = signupAndLogin("order004@example.com");
 
@@ -131,6 +153,27 @@ class OrderApiTest {
     }
 
     @Test
+    void 주문_검증_실패는_wallet_lock과_이벤트를_남기지_않는다() {
+        String token = signupAndLogin("order005b@example.com");
+        depositKrw("order005b@example.com", new BigDecimal("10000000"));
+        var user = userRepository.findByEmail("order005b@example.com").orElseThrow();
+
+        var response = createOrder(token, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000.5", "0.0001", null);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody().get("code")).isEqualTo("INVALID_TICK_SIZE");
+        assertThat(orderRepository.count()).isZero();
+        assertThat(tradeRepository.count()).isZero();
+        assertThat(walletLedgerRepository.count()).isZero();
+        assertThat(domainEventRepository.count()).isZero();
+
+        var krwWallet = findWallet(user.getId(), "KRW");
+        assertThat(krwWallet.getAvailableBalance()).isEqualByComparingTo("10000000");
+        assertThat(krwWallet.getLockedBalance()).isEqualByComparingTo("0");
+        assertThat(matchingEngine.getBuySide("BTC-KRW")).isEmpty();
+    }
+
+    @Test
     void 주문_생성_clientOrderId_중복() {
         String token = signupAndLogin("order006@example.com");
         depositKrw("order006@example.com", new BigDecimal("100000000"));
@@ -140,6 +183,35 @@ class OrderApiTest {
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
         assertThat(response.getBody().get("code")).isEqualTo("DUPLICATE_CLIENT_ORDER_ID");
+    }
+
+    @Test
+    void 중복_clientOrderId_실패는_두번째_wallet_lock을_남기지_않는다() {
+        String token = signupAndLogin("order006b@example.com");
+        depositKrw("order006b@example.com", new BigDecimal("100000000"));
+
+        var firstResponse = createOrder(token, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000", "0.0001", "my-order-2");
+        assertThat(firstResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+
+        long orderCountBefore = orderRepository.count();
+        long ledgerCountBefore = walletLedgerRepository.count();
+        long eventCountBefore = domainEventRepository.count();
+        var user = userRepository.findByEmail("order006b@example.com").orElseThrow();
+        var krwWalletBefore = findWallet(user.getId(), "KRW");
+
+        var duplicateResponse = createOrder(token, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000", "0.0001", "my-order-2");
+
+        assertThat(duplicateResponse.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(duplicateResponse.getBody().get("code")).isEqualTo("DUPLICATE_CLIENT_ORDER_ID");
+        assertThat(orderRepository.count()).isEqualTo(orderCountBefore);
+        assertThat(tradeRepository.count()).isZero();
+        assertThat(walletLedgerRepository.count()).isEqualTo(ledgerCountBefore);
+        assertThat(domainEventRepository.count()).isEqualTo(eventCountBefore);
+
+        var krwWalletAfter = findWallet(user.getId(), "KRW");
+        assertThat(krwWalletAfter.getAvailableBalance()).isEqualByComparingTo(krwWalletBefore.getAvailableBalance());
+        assertThat(krwWalletAfter.getLockedBalance()).isEqualByComparingTo(krwWalletBefore.getLockedBalance());
+        assertThat(matchingEngine.getBuySide("BTC-KRW")).hasSize(1);
     }
 
     @Test
@@ -321,6 +393,40 @@ class OrderApiTest {
         // self-trade 방지 → taker 전체 거절
         assertThat(sellResponse.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
         assertThat(sellResponse.getBody().get("code")).isEqualTo("SELF_TRADE_NOT_ALLOWED");
+    }
+
+    @Test
+    void 자기체결_거절은_taker_order와_정산_side_effect를_남기지_않는다() {
+        String token = signupAndLogin("order017b@example.com");
+        depositKrw("order017b@example.com", new BigDecimal("10000000"));
+        depositBtc("order017b@example.com", new BigDecimal("0.001"));
+
+        createOrder(token, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000", "0.0001", null);
+
+        long orderCountBefore = orderRepository.count();
+        long ledgerCountBefore = walletLedgerRepository.count();
+        long eventCountBefore = domainEventRepository.count();
+        var user = userRepository.findByEmail("order017b@example.com").orElseThrow();
+        var krwWalletBefore = findWallet(user.getId(), "KRW");
+        var btcWalletBefore = findWallet(user.getId(), "BTC");
+
+        var sellResponse = createOrder(token, "BTC-KRW", "SELL", "LIMIT", "GTC", "100000000", "0.0001", null);
+
+        assertThat(sellResponse.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(sellResponse.getBody().get("code")).isEqualTo("SELF_TRADE_NOT_ALLOWED");
+        assertThat(orderRepository.count()).isEqualTo(orderCountBefore);
+        assertThat(tradeRepository.count()).isZero();
+        assertThat(walletLedgerRepository.count()).isEqualTo(ledgerCountBefore);
+        assertThat(domainEventRepository.count()).isEqualTo(eventCountBefore);
+
+        var krwWalletAfter = findWallet(user.getId(), "KRW");
+        var btcWalletAfter = findWallet(user.getId(), "BTC");
+        assertThat(krwWalletAfter.getAvailableBalance()).isEqualByComparingTo(krwWalletBefore.getAvailableBalance());
+        assertThat(krwWalletAfter.getLockedBalance()).isEqualByComparingTo(krwWalletBefore.getLockedBalance());
+        assertThat(btcWalletAfter.getAvailableBalance()).isEqualByComparingTo(btcWalletBefore.getAvailableBalance());
+        assertThat(btcWalletAfter.getLockedBalance()).isEqualByComparingTo(btcWalletBefore.getLockedBalance());
+        assertThat(matchingEngine.getBuySide("BTC-KRW")).hasSize(1);
+        assertThat(matchingEngine.getSellSide("BTC-KRW")).isEmpty();
     }
 
     // ── helpers ───────────────────────────────────────────────────────
