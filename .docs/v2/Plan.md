@@ -1,4 +1,4 @@
-# CoinFlow Phase 2 구현 플랜
+# CoinFlow Phase 2 구현 플랜 및 완료 상태
 
 ## Phase 1 완료 상태 — 이미 있는 것
 
@@ -9,11 +9,42 @@
 | `DomainEventRecorder` | `event/service/DomainEventRecorder.java` | 6종 이벤트 DB 저장 |
 | `Dockerfile` | 루트 | 멀티스테이지 빌드 |
 
-없는 것: `docker-compose.yml`, Kafka 의존성, WebSocket 의존성, OutboxPublisher, WebSocketBroadcaster
+당시 없는 것: `docker-compose.yml`, Kafka 의존성, WebSocket 의존성, OutboxPublisher, WebSocketBroadcaster
+
+## Phase 2 완료 상태
+
+초기 계획은 `#19~#22` 단위로 작성했지만, 실제 구현은 Phase 1 안정화 이후 아래 이슈들로 나누어 완료했다.
+
+| 실제 이슈 | 브랜치 | 완료 범위 | 검증 |
+|---|---|---|---|
+| `#36` | `feat/36/outbox-publisher` | Kafka 설정, Outbox Publisher, 발행 성공/실패 상태 관리 | `OutboxPublisherTest`, `KafkaPublishingIntegrationTest` |
+| `#38` | `feat/38/websocket-trade-feed` | Kafka Consumer 기반 WebSocket 체결 feed | WebSocket unit test, Embedded Kafka integration test |
+| `#40` | `feat/40/websocket-stomp-e2e` | 실제 STOMP client 수신 E2E | `WebSocketStompE2eTest` |
+| `#42` | `feat/42/websocket-orderbook` | Kafka 주문 이벤트 기반 오더북 snapshot broadcast | `OrderBookBroadcasterTest`, `WebSocketOrderBookBroadcastIntegrationTest` |
+
+최종 회귀 검증은 `./gradlew test` 기준 `150`개 테스트 통과로 기록했다. 자세한 실행 결과는 [TEST_RESULTS.md](../TEST_RESULTS.md)를 기준으로 한다.
+
+### Phase 2 완료 범위
+
+- `domain_events.published=false` 이벤트를 Kafka로 발행한다.
+- 발행 성공 시 `published=true`, 실패 시 `publish_attempts++`로 상태를 남긴다.
+- 주문 이벤트는 `coinflow.order.events`, 체결/정산 이벤트는 `coinflow.trade.events`로 라우팅한다.
+- Kafka `TRADE_CREATED` 이벤트를 `/topic/trades/{market}`로 broadcast한다.
+- 실제 STOMP client가 `/topic/trades/BTC-KRW` 메시지를 수신하는 경로를 검증했다.
+- Kafka 주문 이벤트를 받아 현재 인메모리 오더북 snapshot을 `/topic/orderbook/{market}`로 broadcast한다.
+
+### Phase 2 제외 및 후속 범위
+
+- WebSocket 연결 인증/권한 분리
+- 클라이언트 재연결/중복 수신 처리
+- delta orderbook streaming, sequence number, checksum
+- WebSocket consumer 별도 서비스 분리
+- DB에 결과를 쓰는 Consumer의 `processed_events` 기반 idempotency
+- 일별 거래 정산 Batch
 
 ---
 
-## 이슈 #19 — Kafka 환경 구성 (feat/19/kafka-setup)
+## 계획 단위 1 — Kafka 환경 구성
 
 ### 목표
 
@@ -141,7 +172,7 @@ docker exec coinflow-kafka-1 kafka-topics.sh \
 
 ---
 
-## 이슈 #20 — Outbox Publisher (feat/20/outbox-publisher)
+## 계획 단위 2 — Outbox Publisher
 
 ### 목표
 
@@ -292,7 +323,9 @@ docker exec coinflow-kafka-1 kafka-console-consumer.sh \
 
 ---
 
-## 이슈 #21 — WebSocket 실시간 broadcast (feat/21/websocket)
+## 계획 단위 3 — WebSocket 실시간 broadcast
+
+아래 코드는 초기 설계 스케치다. 실제 구현에서는 체결 feed와 오더북 snapshot을 `TradeFeedBroadcaster`, `OrderBookBroadcaster`로 분리했고, 오더북 메시지 필드는 `bids`, `asks`를 사용한다.
 
 ### 목표
 
@@ -366,13 +399,14 @@ public record TradeMessage(
 ) {}
 ```
 
-**5. OrderBookMessage.java / PriceLevel.java** (신규, `/topic/orderbook/{market}` 발행용)
+**5. OrderBookSnapshotMessage.java / PriceLevel.java** (신규, `/topic/orderbook/{market}` 발행용)
 
 ```java
-public record OrderBookMessage(
+public record OrderBookSnapshotMessage(
+        Long             eventId,
         String           market,
-        List<PriceLevel> buySide,    // 높은 가격 우선
-        List<PriceLevel> sellSide    // 낮은 가격 우선
+        List<PriceLevel> bids,    // 높은 가격 우선
+        List<PriceLevel> asks     // 낮은 가격 우선
 ) {}
 
 public record PriceLevel(String price, String quantity) {}
@@ -433,7 +467,7 @@ public class WebSocketBroadcaster {
         try {
             KafkaMessage msg = parse(raw);
             if (ORDER_BOOK_TRIGGERS.contains(msg.eventType())) {
-                OrderBookMessage snapshot = buildSnapshot(msg.marketSymbol());
+                OrderBookSnapshotMessage snapshot = buildSnapshot(msg.eventId(), msg.marketSymbol());
                 messaging.convertAndSend("/topic/orderbook/" + msg.marketSymbol(), snapshot);
             }
         } catch (Exception e) {
@@ -464,10 +498,10 @@ public class WebSocketBroadcaster {
         );
     }
 
-    private OrderBookMessage buildSnapshot(String marketSymbol) {
-        List<PriceLevel> buySide = aggregateLevels(matchingEngine.getBuySide(marketSymbol));
-        List<PriceLevel> sellSide = aggregateLevels(matchingEngine.getSellSide(marketSymbol));
-        return new OrderBookMessage(marketSymbol, buySide, sellSide);
+    private OrderBookSnapshotMessage buildSnapshot(Long eventId, String marketSymbol) {
+        List<PriceLevel> bids = aggregateLevels(matchingEngine.getBuySide(marketSymbol));
+        List<PriceLevel> asks = aggregateLevels(matchingEngine.getSellSide(marketSymbol));
+        return new OrderBookSnapshotMessage(eventId, marketSymbol, bids, asks);
     }
 
     // 같은 가격의 여러 주문을 하나의 호가 레벨로 합산한다
@@ -500,7 +534,7 @@ public class WebSocketBroadcaster {
 | `websocket/WebSocketBroadcaster.java` | 신규 |
 | `websocket/dto/KafkaMessage.java` | 신규 |
 | `websocket/dto/TradeMessage.java` | 신규 |
-| `websocket/dto/OrderBookMessage.java` | 신규 |
+| `websocket/dto/OrderBookSnapshotMessage.java` | 신규 |
 | `websocket/dto/PriceLevel.java` | 신규 |
 | `order/matching/MatchingEngine.java` | `getBuySide()`, `getSellSide()` 추가 |
 | `build.gradle` | `spring-boot-starter-websocket` 추가 |
@@ -533,7 +567,7 @@ destination:/topic/trades/BTC-KRW
 
 ---
 
-## 이슈 #22 — E2E 통합 테스트 (feat/22/e2e)
+## 계획 단위 4 — E2E 통합 테스트
 
 ### 목표
 
@@ -894,28 +928,27 @@ class WebSocketBroadcastTest {
 
 ---
 
-## 전체 구현 순서
+## 실제 구현 순서
 
 ```
-feat/20/wallet PR 완료
+#36 feat/36/outbox-publisher
+  └─ Kafka/Outbox 설정 + OutboxPublisher
+  └─ 검증: OutboxPublisherTest, KafkaPublishingIntegrationTest
     ↓
-feat/19/kafka-setup
-  └─ docker-compose + KafkaTopicConfig + application.properties
-  └─ 검증: docker compose up → Topic 목록 확인
+#38 feat/38/websocket-trade-feed
+  └─ WebSocketConfig + TradeFeedBroadcaster + TradeFeedMessageMapper
+  └─ 검증: Kafka Consumer → SimpMessagingTemplate broadcast
     ↓
-feat/20/outbox-publisher
-  └─ DomainEvent 메서드 + Repository 쿼리 + OutboxPublisher + @EnableScheduling
-  └─ 검증: kafka-console-consumer에서 메시지 1~2초 내 수신
+#40 feat/40/websocket-stomp-e2e
+  └─ 실제 STOMP client 연결/구독/수신 검증
+  └─ 검증: WebSocketStompE2eTest
     ↓
-feat/21/websocket
-  └─ WebSocketConfig + KafkaMessage + TradeMessage + OrderBookMessage
-  └─ WebSocketBroadcaster (buildTradeMessage, buildSnapshot 포함)
-  └─ MatchingEngine에 getBuySide/getSellSide 추가
-  └─ 검증: wscat 구독 후 주문 체결 → TradeMessage 수신
+#42 feat/42/websocket-orderbook
+  └─ Kafka 주문 이벤트 → 오더북 snapshot broadcast
+  └─ 검증: WebSocketOrderBookBroadcastIntegrationTest
     ↓
-feat/22/e2e
-  └─ KafkaPublishingTest + OutboxRetryTest + WebSocketBroadcastTest
-  └─ 검증: ./gradlew test 전체 통과
+전체 회귀 테스트
+  └─ 검증: ./gradlew test, 150 tests passed
 ```
 
 ---

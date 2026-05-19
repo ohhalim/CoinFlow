@@ -178,6 +178,8 @@ WebSocket feed는 STOMP client로 `/ws`에 연결한 뒤 시장별 topic을 구�
 |---|---|
 | [PRD](.docs/PRD.md) | MVP 제품 범위, 포함/제외 기준, 성공 기준 |
 | [Plan](.docs/Plan.md) | MVP 구현 순서와 설계 원칙 |
+| [Phase 2 PRD](.docs/v2/PRD.md) | Kafka/Outbox/WebSocket 외부 전파 범위와 완료 상태 |
+| [Phase 2 Plan](.docs/v2/Plan.md) | Phase 2 구현 계획, 실제 이슈 번호, 후속 범위 |
 | [API](.docs/API.md) | REST API 계약과 에러 코드 |
 | [ERD](.docs/ERD.md) | 테이블 구조와 관계 |
 | [Test Plan](.docs/TestPlan.md) | 핵심 통합 테스트, 동시성 테스트, k6 부하 테스트 계획 |
@@ -188,7 +190,7 @@ WebSocket feed는 STOMP client로 `/ws`에 연결한 뒤 시장별 topic을 구�
 
 ## 다음 단계
 
-현재 구현 완료 범위는 Phase 1 거래 코어, Outbox 기반 Kafka 발행, Kafka Consumer 기반 WebSocket 체결/오더북 알림입니다. Phase 1 거래 코어의 동시성/부하 테스트와 로컬 관측 구성을 마쳤고, 외부 전파는 체결 이벤트와 오더북 snapshot broadcast까지 연결되어 있습니다.
+현재 구현 완료 범위는 Phase 1 거래 코어와 Phase 2 이벤트 기반 외부 전파입니다. Phase 1 거래 코어의 동시성/부하 테스트와 로컬 관측 구성을 마쳤고, Phase 2에서는 Outbox 기반 Kafka 발행, Kafka Consumer 기반 WebSocket 체결 feed, 실제 STOMP 수신 E2E, 오더북 snapshot broadcast까지 연결했습니다.
 
 - WebSocket 연결 인증/권한 분리
 - 정산 Batch 추가
