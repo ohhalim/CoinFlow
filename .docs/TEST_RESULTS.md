@@ -398,7 +398,54 @@ Finding:
 - 기존 Phase 1 정합성 테스트와 Outbox Publisher 검증은 회귀 없이 통과했다.
 - 이번 범위는 체결 feed만 포함한다. 오더북 broadcast, WebSocket 인증/권한 분리, 클라이언트 재연결 처리는 후속 범위로 둔다.
 
-## 10. 발견 이슈
+## 10. WebSocket STOMP 실제 수신 E2E 검증
+
+Date: 2026-05-19
+
+Context:
+
+| 항목 | 값 |
+|---|---|
+| Issue | `#40` WebSocket STOMP 실제 수신 E2E 검증 |
+| Branch | `feat/40/websocket-stomp-e2e` |
+| DB | Testcontainers MySQL 8 |
+| Kafka | Embedded Kafka |
+| WebSocket client | `WebSocketStompClient` + `StandardWebSocketClient` |
+
+Command:
+
+```bash
+./gradlew test --tests com.coinflow.integration.WebSocketStompE2eTest
+./gradlew test
+```
+
+Result:
+
+| 항목 | 값 |
+|---|---:|
+| STOMP E2E integration test | Passed, `1` test |
+| Full regression test | Passed |
+| Total tests | `144` |
+| Failed tests | `0` |
+| STOMP E2E duration | `19s` |
+| Full regression duration | `3m 25s` |
+
+Verified scope:
+
+- 실제 STOMP client가 `ws://localhost:{port}/ws`에 연결한다.
+- client가 `/topic/trades/BTC-KRW`를 구독한다.
+- 주문 체결 후 Outbox Publisher가 Kafka `coinflow.trade.events`에 `TRADE_CREATED` 이벤트를 발행한다.
+- Kafka Consumer가 체결 이벤트를 WebSocket topic으로 broadcast한다.
+- STOMP client가 `TradeFeedMessage`를 수신한다.
+- 수신 메시지의 `market`, `price`, `quantity`, `side`, `tradedAt`을 검증한다.
+
+Finding:
+
+- 기존 #38 테스트는 서버 내부 `SimpMessagingTemplate.convertAndSend()` 호출까지 검증했다.
+- 이번 테스트로 실제 WebSocket 연결, STOMP 구독, Kafka 이벤트 발행, 클라이언트 수신까지 이어지는 E2E 경로를 추가 검증했다.
+- 오더북 broadcast, WebSocket 인증/권한, 재연결/중복 수신 처리는 여전히 후속 범위로 둔다.
+
+## 11. 발견 이슈
 
 | ID | Severity | Symptom | Suspected cause | Action |
 |---|---|---|---|---|
@@ -410,7 +457,7 @@ Severity:
 - `MAJOR`: 5xx, lock timeout, 반복 가능한 성능 병목
 - `MINOR`: 문서/로그/테스트 안정성 개선
 
-## 11. 후속 조치
+## 12. 후속 조치
 
 | Action | Owner | Status | Link |
 |---|---|---|---|
@@ -418,3 +465,4 @@ Severity:
 | Run longer k6 soak test after observability setup |  | DONE |  |
 | Add Outbox Publisher Kafka event publishing |  | DONE |  |
 | Add Kafka Consumer WebSocket trade feed |  | DONE |  |
+| Add WebSocket STOMP receive E2E test |  | DONE |  |
