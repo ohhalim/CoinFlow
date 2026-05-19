@@ -21,6 +21,7 @@ CoinFlow는 단일 인스턴스 환경에서 지정가 주문 생성, 가격-시
 - Outbox Publisher 기반 Kafka 이벤트 발행
 - Kafka 발행 성공/실패 상태와 재시도 횟수 관리
 - Kafka Consumer 기반 WebSocket 실시간 체결 push (`/topic/trades/{market}`)
+- Kafka Consumer 기반 WebSocket 오더북 snapshot push (`/topic/orderbook/{market}`)
 
 ## 제외 범위
 
@@ -29,13 +30,12 @@ CoinFlow는 단일 인스턴스 환경에서 지정가 주문 생성, 가격-시
 - IOC/FOK/GTT, post-only, iceberg 주문
 - 수수료
 - refresh token, OAuth/social login, role/permission
-- WebSocket 실시간 호가 push
 - WebSocket 연결 인증/권한 분리
 - Redis, 서버 분리
 - replay, redrive, reconciliation
 - 관리자 페이지
 
-일부 로컬 개발 편의를 위한 API와 인프라 기반은 존재하지만, 운영 기능 범위와 구분합니다. 예를 들어 dev/test 입금 보조 API는 `prod` 프로필에서 제외됩니다. Kafka는 현재 `domain_events` outbox 발행과 체결 이벤트 WebSocket broadcast까지 연결되어 있습니다.
+일부 로컬 개발 편의를 위한 API와 인프라 기반은 존재하지만, 운영 기능 범위와 구분합니다. 예를 들어 dev/test 입금 보조 API는 `prod` 프로필에서 제외됩니다. Kafka는 현재 `domain_events` outbox 발행과 체결/오더북 WebSocket broadcast까지 연결되어 있습니다.
 
 Phase 1 완료 이후 리뷰 과정에서 zero-quote 체결 방지, dust maker 자동 취소, 오더북 재빌드 같은 정합성 보강이 추가되었습니다.
 
@@ -52,6 +52,7 @@ Phase 1 완료 이후 리뷰 과정에서 zero-quote 체결 방지, dust maker �
 | 원장 | 모든 지갑 변경을 `wallet_ledgers`에 append-only로 기록합니다. |
 | 이벤트 | `domain_events`를 outbox로 사용해 DB commit 이후 Kafka로 발행합니다. |
 | 실시간 체결 | Kafka `TRADE_CREATED` 이벤트를 소비해 `/topic/trades/{market}`로 broadcast합니다. |
+| 실시간 오더북 | Kafka 주문 이벤트를 소비해 현재 인메모리 오더북 snapshot을 `/topic/orderbook/{market}`로 broadcast합니다. |
 
 ## 기술 스택
 
@@ -76,7 +77,7 @@ Phase 1 완료 이후 리뷰 과정에서 zero-quote 체결 방지, dust maker �
 docker compose up -d mysql kafka
 ```
 
-Kafka 없이도 주문/체결 트랜잭션은 실패하지 않지만, `domain_events`는 미발행 상태로 남고 Outbox Publisher가 재시도합니다. Kafka 발행과 WebSocket 체결 feed를 끄고 코어 API만 확인하려면 `OUTBOX_ENABLED=false WEBSOCKET_TRADE_FEED_ENABLED=false`로 실행합니다.
+Kafka 없이도 주문/체결 트랜잭션은 실패하지 않지만, `domain_events`는 미발행 상태로 남고 Outbox Publisher가 재시도합니다. Kafka 발행과 WebSocket broadcast를 끄고 코어 API만 확인하려면 `OUTBOX_ENABLED=false WEBSOCKET_TRADE_FEED_ENABLED=false WEBSOCKET_ORDERBOOK_ENABLED=false`로 실행합니다.
 
 ### 2. 애플리케이션 실행
 
@@ -158,14 +159,18 @@ k6 로컬 부하 테스트는 애플리케이션 실행 후 다음 명령으로 
 k6 run k6/order-flow-load-test.js
 ```
 
-WebSocket 체결 feed는 STOMP client로 `/ws`에 연결한 뒤 시장별 topic을 구독해 확인합니다.
+WebSocket feed는 STOMP client로 `/ws`에 연결한 뒤 시장별 topic을 구독해 확인합니다.
 
 | 항목 | 값 |
 |---|---|
 | WebSocket endpoint | `ws://localhost:8080/ws` |
 | 체결 feed topic | `/topic/trades/{market}` |
-| 예시 topic | `/topic/trades/BTC-KRW` |
-| 메시지 필드 | `eventId`, `market`, `price`, `quantity`, `side`, `tradedAt` |
+| 체결 예시 topic | `/topic/trades/BTC-KRW` |
+| 체결 메시지 필드 | `eventId`, `market`, `price`, `quantity`, `side`, `tradedAt` |
+| 오더북 feed topic | `/topic/orderbook/{market}` |
+| 오더북 예시 topic | `/topic/orderbook/BTC-KRW` |
+| 오더북 메시지 필드 | `eventId`, `market`, `bids`, `asks` |
+| 오더북 price level 필드 | `price`, `quantity` |
 
 ## 문서
 
@@ -183,9 +188,9 @@ WebSocket 체결 feed는 STOMP client로 `/ws`에 연결한 뒤 시장별 topic�
 
 ## 다음 단계
 
-현재 구현 완료 범위는 Phase 1 거래 코어, Outbox 기반 Kafka 발행, Kafka Consumer 기반 WebSocket 체결 알림입니다. Phase 1 거래 코어의 동시성/부하 테스트와 로컬 관측 구성을 마쳤고, 외부 전파는 체결 이벤트 broadcast까지 연결되어 있습니다.
+현재 구현 완료 범위는 Phase 1 거래 코어, Outbox 기반 Kafka 발행, Kafka Consumer 기반 WebSocket 체결/오더북 알림입니다. Phase 1 거래 코어의 동시성/부하 테스트와 로컬 관측 구성을 마쳤고, 외부 전파는 체결 이벤트와 오더북 snapshot broadcast까지 연결되어 있습니다.
 
-- WebSocket 오더북 broadcast
+- WebSocket 연결 인증/권한 분리
 - 정산 Batch 추가
 
-WebSocket 오더북 push, WebSocket 인증/권한 분리, Batch 정산은 아직 구현 완료 기능으로 표기하지 않습니다.
+WebSocket 인증/권한 분리, Batch 정산은 아직 구현 완료 기능으로 표기하지 않습니다.

@@ -600,7 +600,7 @@ k6 부하 테스트는 로컬 환경에서 주문 API와 조회 API의 기본 �
 - `prod` 프로필이 아닌 환경에서 dev-only deposit API 사용 가능
 - k6 기준선은 WebSocket broadcast를 포함하지 않음
 - OutboxPublisher는 Kafka 통합 테스트에서 별도 검증하며, k6 기준선에서는 운영 설정에 따라 함께 동작할 수 있음
-- Kafka Consumer 기반 WebSocket 체결 알림은 별도 통합 테스트에서 검증함
+- Kafka Consumer 기반 WebSocket 체결/오더북 알림은 별도 통합 테스트에서 검증함
 
 ```bash
 docker compose up -d mysql kafka
@@ -661,9 +661,9 @@ thresholds: {
 }
 ```
 
-## 11. WebSocket Trade Feed
+## 11. WebSocket Broadcast
 
-WebSocket 체결 피드는 주문/체결 트랜잭션과 분리된 외부 전파 계층이다. DB commit 이후 Outbox Publisher가 Kafka에 `TRADE_CREATED` 이벤트를 발행하고, WebSocket consumer가 이를 받아 시장별 STOMP topic으로 broadcast하는지 검증한다.
+WebSocket broadcast는 주문/체결 트랜잭션과 분리된 외부 전파 계층이다. DB commit 이후 Outbox Publisher가 Kafka에 이벤트를 발행하고, WebSocket consumer가 이를 받아 시장별 STOMP topic으로 broadcast하는지 검증한다.
 
 ### WS-001 TRADE_CREATED 메시지 변환
 
@@ -726,7 +726,7 @@ When:
 Then:
 
 - `/topic/trades/BTC-KRW`로 체결 메시지가 broadcast된다.
-- 이번 범위는 체결 피드만 검증하며 오더북 broadcast와 WebSocket 인증은 포함하지 않는다.
+- 이번 범위는 체결 피드를 검증하며 WebSocket 인증은 포함하지 않는다.
 
 ### WS-E2E-002 실제 STOMP client 수신
 
@@ -745,6 +745,70 @@ Then:
 
 - STOMP client가 `TradeFeedMessage`를 수신한다.
 - 수신 메시지의 `market`, `price`, `quantity`, `side`, `tradedAt`이 체결 결과와 일치한다.
+
+### WS-004 주문 이벤트 기반 오더북 snapshot broadcast
+
+Given:
+
+- Kafka message eventType이 `ORDER_ACCEPTED`, `ORDER_PARTIALLY_FILLED`, `ORDER_FILLED`, `ORDER_CANCELED` 중 하나이다.
+- market별 인메모리 오더북에 미체결 주문이 존재할 수 있다.
+
+When:
+
+- WebSocket 오더북 broadcaster가 Kafka `coinflow.order.events` 메시지를 수신한다.
+
+Then:
+
+- market별 lock 안에서 현재 인메모리 오더북을 읽는다.
+- REST 오더북 응답과 같은 기준으로 price level을 집계한다.
+- configured depth 범위 안에서 `/topic/orderbook/{market}`로 snapshot을 broadcast한다.
+
+### WS-005 오더북 대상이 아닌 이벤트 무시
+
+Given:
+
+- Kafka message eventType이 오더북 snapshot 대상 주문 이벤트가 아니다.
+
+When:
+
+- WebSocket 오더북 broadcaster가 메시지를 수신한다.
+
+Then:
+
+- `/topic/orderbook/{market}`로 broadcast하지 않는다.
+
+### WS-006 오더북 메시지 파싱 실패 격리
+
+Given:
+
+- Kafka message payload가 깨져 있다.
+
+When:
+
+- WebSocket 오더북 broadcaster가 메시지를 수신한다.
+
+Then:
+
+- 예외를 외부로 전파하지 않는다.
+- 이후 Kafka listener 처리를 중단시키지 않도록 로그만 남긴다.
+
+### WS-E2E-003 주문 생성/체결/취소 후 오더북 snapshot broadcast
+
+Given:
+
+- buyer/seller가 가입되어 있고 KRW/BTC 잔고가 준비되어 있다.
+- `BTC-KRW` 시장에 SELL maker 주문을 생성하거나, BUY taker 주문으로 체결하거나, 미체결 주문을 취소한다.
+
+When:
+
+- Outbox Publisher가 `domain_events`의 주문 이벤트를 Kafka `coinflow.order.events` topic으로 발행한다.
+- WebSocket 오더북 Consumer가 이벤트를 수신한다.
+
+Then:
+
+- 주문 생성 후 `/topic/orderbook/BTC-KRW` 메시지의 ask price level에 잔여 수량이 반영된다.
+- 완전 체결 후 snapshot에서 해당 price level이 제거된다.
+- 취소 후 snapshot에서 해당 price level이 제거된다.
 
 ### LOAD-003 결과 기록 기준
 

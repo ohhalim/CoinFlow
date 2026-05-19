@@ -396,7 +396,7 @@ Finding:
 
 - WebSocket 체결 피드는 주문/체결 DB 트랜잭션과 분리된 외부 전파 계층으로 추가됐다.
 - 기존 Phase 1 정합성 테스트와 Outbox Publisher 검증은 회귀 없이 통과했다.
-- 이번 범위는 체결 feed만 포함한다. 오더북 broadcast, WebSocket 인증/권한 분리, 클라이언트 재연결 처리는 후속 범위로 둔다.
+- 이 시점의 범위는 체결 feed만 포함했다. 오더북 broadcast, WebSocket 인증/권한 분리, 클라이언트 재연결 처리는 후속 범위로 두었다.
 
 ## 10. WebSocket STOMP 실제 수신 E2E 검증
 
@@ -443,9 +443,62 @@ Finding:
 
 - 기존 #38 테스트는 서버 내부 `SimpMessagingTemplate.convertAndSend()` 호출까지 검증했다.
 - 이번 테스트로 실제 WebSocket 연결, STOMP 구독, Kafka 이벤트 발행, 클라이언트 수신까지 이어지는 E2E 경로를 추가 검증했다.
-- 오더북 broadcast, WebSocket 인증/권한, 재연결/중복 수신 처리는 여전히 후속 범위로 둔다.
+- 이 시점에는 오더북 broadcast, WebSocket 인증/권한, 재연결/중복 수신 처리를 후속 범위로 두었다.
 
-## 11. 발견 이슈
+## 11. WebSocket 오더북 snapshot broadcast 검증
+
+Date: 2026-05-19
+
+Context:
+
+| 항목 | 값 |
+|---|---|
+| Issue | `#42` WebSocket 오더북 snapshot broadcast |
+| Branch | `feat/42/websocket-orderbook` |
+| DB | Testcontainers MySQL 8 |
+| Kafka | Embedded Kafka |
+| WebSocket server side | `SimpMessagingTemplate` |
+
+Commands:
+
+```bash
+./gradlew test --tests 'com.coinflow.websocket.*'
+./gradlew test --tests com.coinflow.integration.WebSocketOrderBookBroadcastIntegrationTest
+./gradlew test
+```
+
+Result:
+
+| 항목 | 값 |
+|---|---:|
+| OrderBook broadcaster unit tests | Passed, `3` tests |
+| OrderBook Kafka integration tests | Passed, `3` tests |
+| Full regression test | Passed |
+| Total tests | `150` |
+| Failed tests | `0` |
+| OrderBook integration duration | `21s` |
+| Full regression duration | `3m 37s` |
+
+Verified scope:
+
+- Kafka `coinflow.order.events` topic의 주문 이벤트를 소비한다.
+- `ORDER_ACCEPTED`, `ORDER_PARTIALLY_FILLED`, `ORDER_FILLED`, `ORDER_CANCELED` 이벤트에서 현재 오더북 snapshot을 만든다.
+- REST 오더북과 같은 `OrderBookResponse` 집계 기준을 사용해 price level을 합산한다.
+- configured depth를 `1..100` 범위로 제한한다.
+- 오더북 snapshot을 `/topic/orderbook/{market}`로 broadcast한다.
+- 주문 생성 후 ask price level이 broadcast된다.
+- 완전 체결 후 빈 오더북 snapshot이 broadcast된다.
+- 주문 취소 후 빈 오더북 snapshot이 broadcast된다.
+- 대상 이벤트가 아니거나 Kafka message 파싱이 실패하면 broadcast하지 않고 listener 예외를 전파하지 않는다.
+
+Finding:
+
+- WebSocket 외부 전파 범위가 체결 feed에서 오더북 snapshot까지 확장됐다.
+- 오더북 snapshot은 DB source of truth가 아니라 인메모리 오더북 파생 상태를 전파하는 용도다.
+- 기존 Phase 1 정합성 테스트와 WebSocket 체결 E2E 테스트는 회귀 없이 통과했다.
+- WebSocket 인증/권한, 클라이언트 재연결/중복 수신 처리, delta orderbook streaming은 후속 범위로 둔다.
+
+## 12. 발견 이슈
 
 | ID | Severity | Symptom | Suspected cause | Action |
 |---|---|---|---|---|
@@ -457,7 +510,7 @@ Severity:
 - `MAJOR`: 5xx, lock timeout, 반복 가능한 성능 병목
 - `MINOR`: 문서/로그/테스트 안정성 개선
 
-## 12. 후속 조치
+## 13. 후속 조치
 
 | Action | Owner | Status | Link |
 |---|---|---|---|
@@ -466,3 +519,4 @@ Severity:
 | Add Outbox Publisher Kafka event publishing |  | DONE |  |
 | Add Kafka Consumer WebSocket trade feed |  | DONE |  |
 | Add WebSocket STOMP receive E2E test |  | DONE |  |
+| Add WebSocket orderbook snapshot broadcast |  | DONE |  |
