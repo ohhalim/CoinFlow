@@ -158,6 +158,15 @@ k6 로컬 부하 테스트는 애플리케이션 실행 후 다음 명령으로 
 k6 run k6/order-flow-load-test.js
 ```
 
+WebSocket 체결 feed는 STOMP client로 `/ws`에 연결한 뒤 시장별 topic을 구독해 확인합니다.
+
+| 항목 | 값 |
+|---|---|
+| WebSocket endpoint | `ws://localhost:8080/ws` |
+| 체결 feed topic | `/topic/trades/{market}` |
+| 예시 topic | `/topic/trades/BTC-KRW` |
+| 메시지 필드 | `eventId`, `market`, `price`, `quantity`, `side`, `tradedAt` |
+
 ## 문서
 
 | 문서 | 설명 |

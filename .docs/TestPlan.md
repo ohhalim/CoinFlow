@@ -711,7 +711,7 @@ Then:
 - 예외를 외부로 전파하지 않는다.
 - 이후 Kafka listener 처리를 중단시키지 않도록 로그만 남긴다.
 
-### WS-E2E-001 주문 체결 후 WebSocket 체결 알림
+### WS-E2E-001 주문 체결 후 WebSocket broadcast 호출
 
 Given:
 
@@ -728,6 +728,24 @@ Then:
 - `/topic/trades/BTC-KRW`로 체결 메시지가 broadcast된다.
 - 이번 범위는 체결 피드만 검증하며 오더북 broadcast와 WebSocket 인증은 포함하지 않는다.
 
+### WS-E2E-002 실제 STOMP client 수신
+
+Given:
+
+- 실제 STOMP client가 `ws://localhost:{port}/ws`에 연결되어 있다.
+- client가 `/topic/trades/BTC-KRW`를 구독하고 있다.
+
+When:
+
+- buyer BUY 주문과 seller SELL 주문이 체결된다.
+- Outbox Publisher가 `TRADE_CREATED` 이벤트를 Kafka에 발행한다.
+- WebSocket Kafka Consumer가 이벤트를 받아 `/topic/trades/BTC-KRW`로 broadcast한다.
+
+Then:
+
+- STOMP client가 `TradeFeedMessage`를 수신한다.
+- 수신 메시지의 `market`, `price`, `quantity`, `side`, `tradedAt`이 체결 결과와 일치한다.
+
 ### LOAD-003 결과 기록 기준
 
 k6 결과는 숫자 자체보다 변화 추적이 중요하다.
@@ -743,7 +761,7 @@ k6 결과는 숫자 자체보다 변화 추적이 중요하다.
 
 결과는 README에 모두 붙이지 않고, [TEST_RESULTS.md](./TEST_RESULTS.md)에 실행 환경과 수치를 요약한다.
 
-## 11. Invariants
+## 12. Invariants
 
 모든 통합 테스트 후 아래 불변식을 검증한다.
 
