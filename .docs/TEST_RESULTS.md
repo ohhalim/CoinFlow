@@ -347,9 +347,58 @@ Verified scope:
 Finding:
 
 - Outbox Publisher 추가 후 기존 Phase 1 정합성 테스트가 회귀 없이 통과했다.
-- WebSocket consumer/broadcast는 이번 범위에 포함하지 않고 다음 이슈로 분리한다.
+- 이 시점에는 WebSocket consumer/broadcast를 범위에 포함하지 않고 다음 이슈로 분리했다.
 
-## 9. 발견 이슈
+## 9. WebSocket 체결 알림 검증
+
+Date: 2026-05-18
+
+Context:
+
+| 항목 | 값 |
+|---|---|
+| Issue | `#38` Kafka Consumer 기반 WebSocket 체결 알림 |
+| Branch | `feat/38/websocket-trade-feed` |
+| DB | Testcontainers MySQL 8 |
+| Kafka | Embedded Kafka |
+
+Commands:
+
+```bash
+./gradlew test --tests 'com.coinflow.websocket.*'
+./gradlew test --tests com.coinflow.integration.WebSocketTradeFeedIntegrationTest
+./gradlew test
+```
+
+Result:
+
+| 항목 | 값 |
+|---|---:|
+| WebSocket unit tests | Passed, `6` tests |
+| WebSocket Kafka integration test | Passed, `1` test |
+| Full regression test | Passed |
+| Total tests | `143` |
+| Failed tests | `0` |
+| Full regression duration | `3m 16s` |
+
+Verified scope:
+
+- STOMP endpoint `/ws`와 simple broker `/topic`을 설정한다.
+- Kafka `coinflow.trade.events` topic의 `TRADE_CREATED` 이벤트를 소비한다.
+- Outbox payload를 WebSocket 체결 메시지로 변환한다.
+- `takerOrderId` 기준으로 체결 side `BUY`/`SELL`을 계산한다.
+- 체결 메시지를 `/topic/trades/{market}`로 broadcast한다.
+- 체결 이벤트가 아닌 메시지는 broadcast하지 않는다.
+- Kafka message 파싱 실패가 발생해도 listener 예외를 외부로 전파하지 않는다.
+- 주문 체결 후 Outbox Publisher가 Kafka에 발행한 `TRADE_CREATED` 이벤트가 WebSocket broadcast까지 이어지는 경로를 Embedded Kafka 통합 테스트로 검증했다.
+
+Finding:
+
+- WebSocket 체결 피드는 주문/체결 DB 트랜잭션과 분리된 외부 전파 계층으로 추가됐다.
+- 기존 Phase 1 정합성 테스트와 Outbox Publisher 검증은 회귀 없이 통과했다.
+- 이번 범위는 체결 feed만 포함한다. 오더북 broadcast, WebSocket 인증/권한 분리, 클라이언트 재연결 처리는 후속 범위로 둔다.
+
+## 10. 발견 이슈
 
 | ID | Severity | Symptom | Suspected cause | Action |
 |---|---|---|---|---|
@@ -361,10 +410,11 @@ Severity:
 - `MAJOR`: 5xx, lock timeout, 반복 가능한 성능 병목
 - `MINOR`: 문서/로그/테스트 안정성 개선
 
-## 10. 후속 조치
+## 11. 후속 조치
 
 | Action | Owner | Status | Link |
 |---|---|---|---|
 | Add Prometheus/Grafana local observability compose |  | DONE |  |
 | Run longer k6 soak test after observability setup |  | DONE |  |
 | Add Outbox Publisher Kafka event publishing |  | DONE |  |
+| Add Kafka Consumer WebSocket trade feed |  | DONE |  |
