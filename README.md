@@ -20,6 +20,7 @@ CoinFlow는 단일 인스턴스 환경에서 지정가 주문 생성, 가격-시
 - 주문/체결/정산 도메인 이벤트 로그 저장
 - Outbox Publisher 기반 Kafka 이벤트 발행
 - Kafka 발행 성공/실패 상태와 재시도 횟수 관리
+- Kafka Consumer 기반 WebSocket 실시간 체결 push (`/topic/trades/{market}`)
 
 ## 제외 범위
 
@@ -28,12 +29,13 @@ CoinFlow는 단일 인스턴스 환경에서 지정가 주문 생성, 가격-시
 - IOC/FOK/GTT, post-only, iceberg 주문
 - 수수료
 - refresh token, OAuth/social login, role/permission
-- WebSocket 실시간 체결/호가 push
-- Redis, MQ, 서버 분리
+- WebSocket 실시간 호가 push
+- WebSocket 연결 인증/권한 분리
+- Redis, 서버 분리
 - replay, redrive, reconciliation
 - 관리자 페이지
 
-일부 로컬 개발 편의를 위한 API와 인프라 기반은 존재하지만, 운영 기능 범위와 구분합니다. 예를 들어 dev/test 입금 보조 API는 `prod` 프로필에서 제외됩니다. Kafka는 현재 `domain_events` outbox 발행까지 연결되어 있으며, WebSocket consumer/broadcast는 다음 단계입니다.
+일부 로컬 개발 편의를 위한 API와 인프라 기반은 존재하지만, 운영 기능 범위와 구분합니다. 예를 들어 dev/test 입금 보조 API는 `prod` 프로필에서 제외됩니다. Kafka는 현재 `domain_events` outbox 발행과 체결 이벤트 WebSocket broadcast까지 연결되어 있습니다.
 
 Phase 1 완료 이후 리뷰 과정에서 zero-quote 체결 방지, dust maker 자동 취소, 오더북 재빌드 같은 정합성 보강이 추가되었습니다.
 
@@ -49,6 +51,7 @@ Phase 1 완료 이후 리뷰 과정에서 zero-quote 체결 방지, dust maker �
 | 지갑 모델 | `available_balance`와 `locked_balance`를 분리합니다. |
 | 원장 | 모든 지갑 변경을 `wallet_ledgers`에 append-only로 기록합니다. |
 | 이벤트 | `domain_events`를 outbox로 사용해 DB commit 이후 Kafka로 발행합니다. |
+| 실시간 체결 | Kafka `TRADE_CREATED` 이벤트를 소비해 `/topic/trades/{market}`로 broadcast합니다. |
 
 ## 기술 스택
 
@@ -73,7 +76,7 @@ Phase 1 완료 이후 리뷰 과정에서 zero-quote 체결 방지, dust maker �
 docker compose up -d mysql kafka
 ```
 
-Kafka 없이도 주문/체결 트랜잭션은 실패하지 않지만, `domain_events`는 미발행 상태로 남고 Outbox Publisher가 재시도합니다. Kafka 발행을 끄고 코어 API만 확인하려면 `OUTBOX_ENABLED=false`로 실행합니다.
+Kafka 없이도 주문/체결 트랜잭션은 실패하지 않지만, `domain_events`는 미발행 상태로 남고 Outbox Publisher가 재시도합니다. Kafka 발행과 WebSocket 체결 feed를 끄고 코어 API만 확인하려면 `OUTBOX_ENABLED=false WEBSOCKET_TRADE_FEED_ENABLED=false`로 실행합니다.
 
 ### 2. 애플리케이션 실행
 
@@ -141,6 +144,7 @@ Grafana에는 `CoinFlow Overview` 대시보드가 자동 등록됩니다.
 - 도메인 이벤트 저장
 - Outbox Publisher Kafka 발행
 - Kafka 발행 실패 시 outbox 재시도 상태 전이
+- Kafka Consumer 기반 WebSocket 체결 알림
 - 지갑 잔고 음수 방지
 - 동일 사용자 동시 주문 시 잔고 음수 방지
 - 하나의 maker 주문에 대한 동시 taker 체결 수량 초과 방지
@@ -170,9 +174,9 @@ k6 run k6/order-flow-load-test.js
 
 ## 다음 단계
 
-현재 구현 완료 범위는 Phase 1 거래 코어와 Outbox 기반 Kafka 발행입니다. Phase 1 거래 코어의 동시성/부하 테스트와 로컬 관측 구성을 마쳤고, 외부 전파는 Kafka 발행까지만 연결되어 있습니다.
+현재 구현 완료 범위는 Phase 1 거래 코어, Outbox 기반 Kafka 발행, Kafka Consumer 기반 WebSocket 체결 알림입니다. Phase 1 거래 코어의 동시성/부하 테스트와 로컬 관측 구성을 마쳤고, 외부 전파는 체결 이벤트 broadcast까지 연결되어 있습니다.
 
-- Kafka Consumer 기반 WebSocket 체결/오더북 broadcast
+- WebSocket 오더북 broadcast
 - 정산 Batch 추가
 
-WebSocket, Batch 정산은 아직 구현 완료 기능으로 표기하지 않습니다.
+WebSocket 오더북 push, WebSocket 인증/권한 분리, Batch 정산은 아직 구현 완료 기능으로 표기하지 않습니다.
