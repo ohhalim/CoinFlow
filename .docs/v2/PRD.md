@@ -1,5 +1,21 @@
 # CoinFlow Phase 2 PRD
 
+## 0. 완료 상태 요약
+
+Phase 2는 이벤트 기반 외부 전파 계층을 추가하는 단계로 완료했다.
+
+| 구분 | 상태 | 근거 |
+|---|---|---|
+| Outbox 기반 Kafka 발행 | 완료 | `#36` |
+| Kafka 발행 실패/재시도 상태 관리 | 완료 | `#36` |
+| WebSocket 체결 feed | 완료 | `#38` |
+| 실제 STOMP client 수신 E2E | 완료 | `#40` |
+| WebSocket 오더북 snapshot broadcast | 완료 | `#42` |
+
+완료 기준은 `./gradlew test` 전체 회귀 통과와 [TEST_RESULTS.md](../TEST_RESULTS.md)에 기록된 이슈별 검증 결과다.
+
+Phase 2에서 다루지 않은 WebSocket 인증/권한, 재연결/중복 수신 처리, delta orderbook streaming, DB Consumer idempotency, 정산 Batch는 후속 범위로 둔다.
+
 ## 1. 배경
 
 ### Phase 1에서 완성한 것
@@ -66,8 +82,8 @@ Phase 1에서 `domain_events` 테이블에 이미 이벤트를 저장하고 있�
 
 **보장하는 것:**
 - Kafka 장애 중에도 이벤트는 DB에 안전하게 보관된다
-- 서버 재시작 후 미발행 이벤트가 자동으로 재발행된다
-- `publish_attempts`로 실패 횟수를 추적하고 임계치 초과 시 dead-letter로 분류한다
+- 서버 재시작 후에도 `published=false` 이벤트는 다음 polling 대상이 된다
+- `publish_attempts`로 실패 횟수를 추적하고 임계치 초과 시 자동 polling 대상에서 제외한다
 
 **감수하는 것:**
 - at-least-once → 중복 발행이 발생할 수 있다
@@ -207,8 +223,8 @@ Kafka로 재발행 → published=true
 | Kafka 일시 장애 | send() 호출 시 | `publish_attempts++`, 다음 poll에서 재시도 | Kafka 복구 후 자동 재발행 |
 | 서버 재시작 (정상) | publish 완료 전 | `published=false` 이벤트 남아있음 | 재시작 후 @Scheduled가 자동 재발행 |
 | 서버 재시작 (send 후 ACK 전) | Kafka 수신, DB 미갱신 | `published=false`로 남아 재발행 | Consumer가 중복 수신 → idempotent 처리 |
-| Kafka 영구 장애 | send() 5회 실패 | `publish_attempts=5`, 폴링 제외 | 수동 조회 후 재처리 또는 dead-letter 큐 |
-| WebSocket 연결 끊김 | broadcast 시 | 해당 클라이언트만 미수신 | 클라이언트가 재연결 후 최신 스냅샷 수신 |
+| Kafka 영구 장애 | send() 5회 실패 | `publish_attempts=5`, 폴링 제외 | 수동 조회 후 재처리 |
+| WebSocket 연결 끊김 | broadcast 시 | 해당 클라이언트만 미수신 | 클라이언트 재연결 후 REST 조회 또는 다음 snapshot 이벤트로 복구 |
 
 ---
 
@@ -265,7 +281,7 @@ Consumer group의 병렬 처리 가능한 Consumer 수의 상한이 파티션 �
 | 채널 | 발행 트리거 | 페이로드 | 용도 |
 |------|------------|----------|------|
 | `/topic/trades/{market}` | TRADE_CREATED | price, quantity, side, tradedAt | 체결 피드 |
-| `/topic/orderbook/{market}` | ORDER_ACCEPTED / FILLED / PARTIALLY_FILLED / CANCELED | buySide[], sellSide[] 전체 스냅샷 | 호가창 갱신 |
+| `/topic/orderbook/{market}` | ORDER_ACCEPTED / FILLED / PARTIALLY_FILLED / CANCELED | bids[], asks[] 전체 스냅샷 | 호가창 갱신 |
 
 **오더북을 delta가 아닌 스냅샷으로 broadcast하는 이유:**
 - delta 방식은 클라이언트가 로컬 상태를 유지하고 순서를 보장해야 한다
@@ -282,12 +298,14 @@ takerOrderId == sellOrderId → side = "SELL"
 
 ## 10. 구현 이슈
 
+초기 설계 문서는 `#19~#22` 단위로 계획했지만, 실제 구현은 아래 이슈들로 분리해 완료했다.
+
 | 이슈 | 브랜치 | 내용 |
 |------|--------|------|
-| #19 | feat/19/kafka-setup | Docker Compose (MySQL + Kafka KRaft), Topic 설정, KafkaTemplate 빈 |
-| #20 | feat/20/outbox-publisher | OutboxPublisher, 재시도/dead-letter 처리 |
-| #21 | feat/21/websocket | STOMP WebSocket, Kafka Consumer → broadcast |
-| #22 | feat/22/e2e | 주문 체결 → Kafka 발행 → WebSocket 수신 end-to-end 자동 검증 |
+| #36 | `feat/36/outbox-publisher` | Kafka/Outbox 설정, OutboxPublisher, 발행 성공/실패 상태 관리 |
+| #38 | `feat/38/websocket-trade-feed` | Kafka Consumer 기반 WebSocket 체결 feed |
+| #40 | `feat/40/websocket-stomp-e2e` | 실제 STOMP client 수신 E2E 검증 |
+| #42 | `feat/42/websocket-orderbook` | Kafka 주문 이벤트 기반 오더북 snapshot broadcast |
 
 ---
 
@@ -304,16 +322,34 @@ takerOrderId == sellOrderId → side = "SELL"
 
 ## 12. 성공 기준
 
-| 기준 | 측정 방법 |
-|------|-----------|
-| 주문 체결 → 2초 내 WebSocket 메시지 수신 | E2E 테스트 timeout 5s |
-| Kafka 재시작 후 미발행 이벤트 자동 재발행 | `published=false` 이벤트 재발행 확인 |
-| `publish_attempts >= 5` 이벤트 dead-letter 분류 | SQL 조회로 확인 |
-| E2E 통합 테스트 통과 | `./gradlew test` CI 기준 |
+| 기준 | 측정 방법 | 상태 |
+|------|-----------|---|
+| 주문 체결 → 2초 내 WebSocket 메시지 수신 | E2E 테스트 timeout 5s | 완료 |
+| 미발행 이벤트 재발행 경로 | `published=false` 이벤트 polling 재시도 확인 | 완료 |
+| `publish_attempts >= 5` 이벤트 polling 제외 | 폴링 대상 제외 테스트 | 완료 |
+| 오더북 snapshot broadcast | 주문 생성/체결/취소 후 `/topic/orderbook/{market}` 검증 | 완료 |
+| E2E 통합 테스트 통과 | `./gradlew test` CI 기준 | 완료 |
+
+Kafka 프로세스를 실제로 재시작하는 운영형 장애 테스트는 Phase 2 자동 테스트 범위에 포함하지 않았다. 현재 검증은 `published=false` 이벤트가 재시도 대상에 남는 구조와 발행 실패 상태 전이를 기준으로 한다.
 
 ---
 
-## 13. Phase 3 확장 방향
+## 13. 후속 범위
+
+Phase 2는 단일 앱 내부의 Kafka Consumer와 WebSocket broadcast까지를 완료 범위로 둔다. 아래 항목은 다음 단계에서 별도 이슈로 다룬다.
+
+- WebSocket 연결 인증/권한 분리
+- 클라이언트 재연결/중복 수신 처리
+- WebSocket/Kafka 실시간 전파 부하 테스트
+- 매칭 엔진 성능 기준선 측정
+- delta orderbook streaming, sequence number, checksum
+- Consumer 별도 서비스 분리
+- DB에 결과를 쓰는 Consumer의 `processed_events` 기반 idempotency
+- 일별 거래 정산 Batch
+
+---
+
+## 14. Phase 3 확장 방향
 
 | 항목 | Phase 2 | Phase 3 |
 |------|---------|---------|
