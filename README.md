@@ -193,6 +193,8 @@ WebSocket feed는 STOMP client로 `/ws`에 연결한 뒤 시장별 topic을 구�
 현재 구현 완료 범위는 Phase 1 거래 코어와 Phase 2 이벤트 기반 외부 전파입니다. Phase 1 거래 코어의 동시성/부하 테스트와 로컬 관측 구성을 마쳤고, Phase 2에서는 Outbox 기반 Kafka 발행, Kafka Consumer 기반 WebSocket 체결 feed, 실제 STOMP 수신 E2E, 오더북 snapshot broadcast까지 연결했습니다.
 
 - WebSocket 연결 인증/권한 분리
+- WebSocket/Kafka 실시간 전파 부하 테스트
+- 매칭 엔진 성능 기준선 측정
 - 정산 Batch 추가
 
 WebSocket 인증/권한 분리, Batch 정산은 아직 구현 완료 기능으로 표기하지 않습니다.

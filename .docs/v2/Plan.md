@@ -37,6 +37,8 @@
 
 - WebSocket 연결 인증/권한 분리
 - 클라이언트 재연결/중복 수신 처리
+- WebSocket/Kafka 실시간 전파 부하 테스트
+- 매칭 엔진 성능 기준선 측정
 - delta orderbook streaming, sequence number, checksum
 - WebSocket consumer 별도 서비스 분리
 - DB에 결과를 쓰는 Consumer의 `processed_events` 기반 idempotency
@@ -178,7 +180,7 @@ docker exec coinflow-kafka-1 kafka-topics.sh \
 
 `domain_events.published=false` 이벤트를 1초마다 폴링해 Kafka로 발행한다.
 발행 성공 시 `published=true`, 실패 시 `publish_attempts++`.
-5회 실패한 이벤트는 dead-letter로 분류해 폴링에서 제외한다.
+5회 실패한 이벤트는 자동 polling 대상에서 제외한다.
 
 ### 핵심 설계 결정
 
@@ -325,7 +327,19 @@ docker exec coinflow-kafka-1 kafka-console-consumer.sh \
 
 ## 계획 단위 3 — WebSocket 실시간 broadcast
 
-아래 코드는 초기 설계 스케치다. 실제 구현에서는 체결 feed와 오더북 snapshot을 `TradeFeedBroadcaster`, `OrderBookBroadcaster`로 분리했고, 오더북 메시지 필드는 `bids`, `asks`를 사용한다.
+아래 코드는 초기 설계 스케치다. 실제 구현은 다음 파일을 기준으로 한다.
+
+| 실제 구현 파일 | 역할 |
+|---|---|
+| `config/WebSocketConfig.java` | STOMP endpoint `/ws`, simple broker `/topic` 설정 |
+| `websocket/TradeFeedBroadcaster.java` | Kafka `TRADE_CREATED` 이벤트를 `/topic/trades/{market}`로 broadcast |
+| `websocket/TradeFeedMessageMapper.java` | Kafka message payload를 체결 feed 메시지로 변환 |
+| `websocket/OrderBookBroadcaster.java` | Kafka 주문 이벤트를 `/topic/orderbook/{market}` snapshot으로 broadcast |
+| `websocket/dto/KafkaEventMessage.java` | Kafka 이벤트 공통 메시지 DTO |
+| `websocket/dto/TradeFeedMessage.java` | 체결 feed 메시지 DTO |
+| `websocket/dto/OrderBookSnapshotMessage.java` | 오더북 snapshot 메시지 DTO |
+
+초기 스케치와 달리 실제 구현에서는 체결 feed와 오더북 snapshot을 분리했고, 오더북 메시지 필드는 `bids`, `asks`를 사용한다.
 
 ### 목표
 
@@ -539,6 +553,8 @@ public class WebSocketBroadcaster {
 | `order/matching/MatchingEngine.java` | `getBuySide()`, `getSellSide()` 추가 |
 | `build.gradle` | `spring-boot-starter-websocket` 추가 |
 | `config/SecurityConfig.java` | `/ws/**` permitAll 추가 |
+
+실제 완료 구현에서는 `WebSocketBroadcaster` 단일 클래스 대신 `TradeFeedBroadcaster`와 `OrderBookBroadcaster`로 책임을 분리했다.
 
 ### 완료 기준
 
@@ -922,9 +938,11 @@ class WebSocketBroadcastTest {
 
 | 파일 | 작업 |
 |------|------|
-| `e2e/KafkaPublishingTest.java` | 신규 |
-| `e2e/OutboxRetryTest.java` | 신규 |
-| `e2e/WebSocketBroadcastTest.java` | 신규 |
+| `integration/KafkaPublishingIntegrationTest.java` | 신규 |
+| `event/service/OutboxPublisherTest.java` | 신규 |
+| `integration/WebSocketTradeFeedIntegrationTest.java` | 신규 |
+| `integration/WebSocketStompE2eTest.java` | 신규 |
+| `integration/WebSocketOrderBookBroadcastIntegrationTest.java` | 신규 |
 
 ---
 

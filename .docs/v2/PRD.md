@@ -83,7 +83,7 @@ Phase 1에서 `domain_events` 테이블에 이미 이벤트를 저장하고 있�
 **보장하는 것:**
 - Kafka 장애 중에도 이벤트는 DB에 안전하게 보관된다
 - 서버 재시작 후에도 `published=false` 이벤트는 다음 polling 대상이 된다
-- `publish_attempts`로 실패 횟수를 추적하고 임계치 초과 시 dead-letter로 분류한다
+- `publish_attempts`로 실패 횟수를 추적하고 임계치 초과 시 자동 polling 대상에서 제외한다
 
 **감수하는 것:**
 - at-least-once → 중복 발행이 발생할 수 있다
@@ -223,7 +223,7 @@ Kafka로 재발행 → published=true
 | Kafka 일시 장애 | send() 호출 시 | `publish_attempts++`, 다음 poll에서 재시도 | Kafka 복구 후 자동 재발행 |
 | 서버 재시작 (정상) | publish 완료 전 | `published=false` 이벤트 남아있음 | 재시작 후 @Scheduled가 자동 재발행 |
 | 서버 재시작 (send 후 ACK 전) | Kafka 수신, DB 미갱신 | `published=false`로 남아 재발행 | Consumer가 중복 수신 → idempotent 처리 |
-| Kafka 영구 장애 | send() 5회 실패 | `publish_attempts=5`, 폴링 제외 | 수동 조회 후 재처리 또는 dead-letter 큐 |
+| Kafka 영구 장애 | send() 5회 실패 | `publish_attempts=5`, 폴링 제외 | 수동 조회 후 재처리 |
 | WebSocket 연결 끊김 | broadcast 시 | 해당 클라이언트만 미수신 | 클라이언트 재연결 후 REST 조회 또는 다음 snapshot 이벤트로 복구 |
 
 ---
@@ -326,7 +326,7 @@ takerOrderId == sellOrderId → side = "SELL"
 |------|-----------|---|
 | 주문 체결 → 2초 내 WebSocket 메시지 수신 | E2E 테스트 timeout 5s | 완료 |
 | 미발행 이벤트 재발행 경로 | `published=false` 이벤트 polling 재시도 확인 | 완료 |
-| `publish_attempts >= 5` 이벤트 dead-letter 분류 | 폴링 대상 제외 테스트 | 완료 |
+| `publish_attempts >= 5` 이벤트 polling 제외 | 폴링 대상 제외 테스트 | 완료 |
 | 오더북 snapshot broadcast | 주문 생성/체결/취소 후 `/topic/orderbook/{market}` 검증 | 완료 |
 | E2E 통합 테스트 통과 | `./gradlew test` CI 기준 | 완료 |
 
@@ -340,6 +340,8 @@ Phase 2는 단일 앱 내부의 Kafka Consumer와 WebSocket broadcast까지를 �
 
 - WebSocket 연결 인증/권한 분리
 - 클라이언트 재연결/중복 수신 처리
+- WebSocket/Kafka 실시간 전파 부하 테스트
+- 매칭 엔진 성능 기준선 측정
 - delta orderbook streaming, sequence number, checksum
 - Consumer 별도 서비스 분리
 - DB에 결과를 쓰는 Consumer의 `processed_events` 기반 idempotency
