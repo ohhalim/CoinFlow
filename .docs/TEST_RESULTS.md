@@ -498,7 +498,72 @@ Finding:
 - 기존 Phase 1 정합성 테스트와 WebSocket 체결 E2E 테스트는 회귀 없이 통과했다.
 - WebSocket 인증/권한, 클라이언트 재연결/중복 수신 처리, delta orderbook streaming은 후속 범위로 둔다.
 
-## 12. 발견 이슈
+## 12. WebSocket/Kafka 실시간 전파 부하 테스트
+
+Date: 2026-05-20
+
+Context:
+
+| 항목 | 값 |
+|---|---|
+| Issue | `#48` WebSocket/Kafka 실시간 전파 부하 테스트 |
+| Branch | `test/48/websocket-kafka-load-test` |
+| DB | Local Docker MySQL 8 |
+| Kafka | Local Docker Kafka |
+| Observability | Prometheus / Grafana |
+
+Command:
+
+```bash
+k6 run k6/websocket-kafka-load-test.js
+```
+
+Result:
+
+| 항목 | 값 |
+|---|---:|
+| Status | Passed |
+| Duration | `30s` order creation / `40s` WebSocket subscriber |
+| Order rate | `10 iterations/s` |
+| WebSocket subscribers | `5` |
+| WebSocket connections | `5` |
+| Completed iterations | `305` |
+| Interrupted iterations | `0` |
+| Created orders | `300` |
+| Created trades | `150` |
+| Current-run trade feed messages | `750` |
+| OrderBook snapshot messages | `3000` |
+| Trade delivery lag p95 | `1.02s` |
+| Order create p95 | `50.43ms` |
+| HTTP p95 | `102.03ms` |
+| HTTP failed rate | `0.00%` |
+| 5xx count | `0` |
+
+Verified scope:
+
+- STOMP client가 `/ws`에 연결한다.
+- `/topic/trades/BTC-KRW`, `/topic/orderbook/BTC-KRW`를 구독한다.
+- 주문 생성 부하 중 Kafka Consumer 기반 WebSocket broadcast를 수신한다.
+- WebSocket handshake는 k6 setup에서 생성한 JWT를 사용해 실제 인증 사용자 흐름으로 검증한다.
+- 체결 feed는 `tradedAt` 기준 수신 지연을 측정한다. 단, 로컬 Kafka/Outbox backlog로 인한 왜곡을 피하기 위해 테스트 시작 이후 생성된 trade만 latency 샘플에 포함한다.
+- 오더북 snapshot은 수신 여부와 메시지 구조를 검증한다.
+
+Grafana observations:
+
+| 항목 | 관측 |
+|---|---|
+| JVM heap used max over 10m | about `314.35 MiB` (`329616280 bytes`) |
+| GC pause max over 10m | `0.020s` |
+| HTTP latency | k6 p95 `102.03ms`, Prometheus p95 sample about `103.78ms` |
+| Hikari connection | active max `1`, pending max `0` |
+| 5xx increase over 10m | no series observed; k6 `server_errors=0` |
+
+Finding:
+
+- WebSocket handshake, STOMP subscribe, Kafka Consumer broadcast, client receive path가 로컬 부하에서 동작했다.
+- 앱 재기동 직후 Kafka/Outbox에 과거 이벤트 backlog가 남아 있으면 첫 실행의 `ws_trade_delivery_lag`가 크게 튈 수 있다. 기준선 측정은 backlog를 비운 뒤 또는 fresh Kafka/DB 환경에서 실행한다.
+
+## 13. 발견 이슈
 
 | ID | Severity | Symptom | Suspected cause | Action |
 |---|---|---|---|---|
@@ -510,7 +575,7 @@ Severity:
 - `MAJOR`: 5xx, lock timeout, 반복 가능한 성능 병목
 - `MINOR`: 문서/로그/테스트 안정성 개선
 
-## 13. 후속 조치
+## 14. 후속 조치
 
 | Action | Owner | Status | Link |
 |---|---|---|---|
@@ -520,3 +585,4 @@ Severity:
 | Add Kafka Consumer WebSocket trade feed |  | DONE |  |
 | Add WebSocket STOMP receive E2E test |  | DONE |  |
 | Add WebSocket orderbook snapshot broadcast |  | DONE |  |
+| Add WebSocket/Kafka realtime propagation load test |  | DONE |  |
