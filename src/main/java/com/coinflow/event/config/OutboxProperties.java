@@ -12,9 +12,9 @@ import org.springframework.stereotype.Component;
 public class OutboxProperties {
 
     private boolean enabled = true;
-    private long fixedDelayMs = 1000;
+    private long fixedDelayMs = 200;
     private int maxAttempts = 5;
-    private int batchSize = 100;
+    private int batchSize = 500;
     private long sendTimeoutMs = 5000;
     private String orderTopic = "coinflow.order.events";
     private String tradeTopic = "coinflow.trade.events";

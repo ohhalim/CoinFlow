@@ -12,7 +12,7 @@ public class OutboxPublishingScheduler {
 
     private final OutboxPublisher outboxPublisher;
 
-    @Scheduled(fixedDelayString = "${coinflow.outbox.fixed-delay-ms:1000}")
+    @Scheduled(fixedDelayString = "${coinflow.outbox.fixed-delay-ms:200}")
     public void publish() {
         outboxPublisher.publishPendingEvents();
     }
