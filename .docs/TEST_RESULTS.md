@@ -576,11 +576,61 @@ Finding:
 - HTTP 실패율과 5xx는 0이므로, 현재 한계는 주문 API 처리보다 실시간 전파 경로에 있다.
 - 앱 재기동 직후 Kafka/Outbox에 과거 이벤트 backlog가 남아 있으면 첫 실행의 `ws_trade_delivery_lag`가 크게 튈 수 있다. 기준선 측정은 backlog를 비운 뒤 또는 fresh Kafka/DB 환경에서 실행한다.
 
-## 13. 발견 이슈
+## 13. WebSocket/Kafka 실시간 전파 병목 완화
+
+Date: 2026-05-21
+
+Context:
+
+| 항목 | 값 |
+|---|---|
+| Issue | `#49` WebSocket broadcast 병목 완화 |
+| Branch | `perf/49/websocket-broadcast-bottleneck` |
+| DB | Local Docker MySQL 8 |
+| Kafka | Local Docker Kafka |
+| Observability | Prometheus / Grafana |
+
+Changes:
+
+- WebSocket outbound channel executor를 명시적으로 설정했다.
+- trade feed / orderbook broadcast duration, sent count를 Micrometer metric으로 기록한다.
+- OrderBook snapshot은 이벤트마다 즉시 전송하지 않고 market별로 짧은 window 동안 coalescing한다.
+- Outbox 기본 발행 설정을 `100 events / 1000ms`에서 `500 events / 200ms`로 조정했다.
+
+Comparison:
+
+| Scenario | Change point | Status | Trade lag p95 | Trade lag p99 | OrderBook messages | Order create p95 | HTTP failed | 5xx |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| 50 subscribers / 30 order/s | Before | PASS | 2.10s | 2.28s | 89,250 | 44.05ms | 0.00% | 0 |
+| 50 subscribers / 30 order/s | After orderbook coalescing | PASS | 1.81s | 1.92s | 1,400 | 40.58ms | 0.00% | 0 |
+| 50 subscribers / 30 order/s | After Outbox cadence tuning | PASS | 225ms | 242ms | 6,500 | 30.59ms | 0.00% | 0 |
+| 50 subscribers / 50 order/s | Before | FAIL | 14.49s | 15.11s | 104,200 | 29.75ms | 0.00% | 0 |
+| 50 subscribers / 50 order/s | After orderbook coalescing | FAIL | 14.79s | 15.42s | 1,600 | 40.71ms | 0.00% | 0 |
+| 50 subscribers / 50 order/s | After Outbox cadence tuning | PASS | 250ms | 261ms | 5,950 | 45.81ms | 0.00% | 0 |
+
+Additional observations:
+
+| 항목 | 관측 |
+|---|---|
+| Outbox unpublished events after run | `0` |
+| Kafka consumer lag after run | `0` for `coinflow-websocket` group |
+| `websocket.trade.broadcast.duration` max | `0.0032s` |
+| `websocket.orderbook.broadcast.duration` max | `0.089s` |
+| Hikari connection after run | active `0`, pending `0` |
+| JVM GC pause max sample | `0.012s` |
+
+Finding:
+
+- OrderBook coalescing은 fan-out 메시지 수를 크게 줄였지만, `ORDER_RATE=50`의 trade feed 지연은 해결하지 못했다.
+- `websocket.trade.broadcast.duration` 자체는 ms 이하~수 ms 수준이므로, 주 병목은 STOMP `convertAndSend`가 아니었다.
+- `ORDER_RATE=50`에서는 주문/체결당 생성되는 domain event 수가 많아 기존 Outbox 설정(`100 events / 1000ms`)이 이벤트 발행 속도를 따라가지 못했다.
+- Outbox 발행 주기와 batch size를 조정하자 `50 subscribers / 50 order/s`에서도 trade feed p95가 `14.49s`에서 `250ms`로 개선됐다.
+
+## 14. 발견 이슈
 
 | ID | Severity | Symptom | Suspected cause | Action |
 |---|---|---|---|---|
-| WS-001 | MAJOR | `ORDER_RATE=50`에서 trade feed p95가 `13s~14s`대로 상승 | Kafka Consumer -> WebSocket broadcast 처리량이 주문 생성 속도를 따라가지 못함 | Outbox publish cadence, Consumer batch/worker, WebSocket broadcast executor 분리 검토 |
+| WS-001 | MAJOR | `ORDER_RATE=50`에서 trade feed p95가 `13s~14s`대로 상승 | Outbox 발행 주기/배치가 domain event 생성 속도를 따라가지 못함 | `#49`에서 Outbox cadence 조정 후 p95 `250ms`로 개선 |
 
 Severity:
 
@@ -588,7 +638,7 @@ Severity:
 - `MAJOR`: 5xx, lock timeout, 반복 가능한 성능 병목
 - `MINOR`: 문서/로그/테스트 안정성 개선
 
-## 14. 후속 조치
+## 15. 후속 조치
 
 | Action | Owner | Status | Link |
 |---|---|---|---|
@@ -600,3 +650,4 @@ Severity:
 | Add WebSocket orderbook snapshot broadcast |  | DONE |  |
 | Add WebSocket/Kafka realtime propagation load test |  | DONE |  |
 | Expand WebSocket/Kafka propagation load baseline |  | DONE |  |
+| Reduce WebSocket/Kafka propagation bottleneck |  | DONE |  |
