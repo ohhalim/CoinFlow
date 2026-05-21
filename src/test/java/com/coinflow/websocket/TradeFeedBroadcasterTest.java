@@ -2,6 +2,7 @@ package com.coinflow.websocket;
 
 import com.coinflow.websocket.dto.TradeFeedMessage;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 
@@ -12,7 +13,8 @@ class TradeFeedBroadcasterTest {
     private final SimpMessagingTemplate messagingTemplate = mock(SimpMessagingTemplate.class);
     private final TradeFeedBroadcaster broadcaster = new TradeFeedBroadcaster(
             messagingTemplate,
-            new TradeFeedMessageMapper(new ObjectMapper())
+            new TradeFeedMessageMapper(new ObjectMapper()),
+            new SimpleMeterRegistry()
     );
 
     @Test

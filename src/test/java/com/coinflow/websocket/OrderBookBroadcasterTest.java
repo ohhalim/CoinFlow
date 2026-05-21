@@ -5,12 +5,15 @@ import com.coinflow.order.matching.OrderBookEntry;
 import com.coinflow.order.service.OrderService;
 import com.coinflow.websocket.dto.OrderBookSnapshotMessage;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
+import org.springframework.scheduling.TaskScheduler;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -20,19 +23,29 @@ import static org.mockito.Mockito.*;
 
 class OrderBookBroadcasterTest {
 
-    private final SimpMessagingTemplate messagingTemplate = mock(SimpMessagingTemplate.class);
-    private final MatchingEngine matchingEngine = mock(MatchingEngine.class);
-    private final OrderService orderService = mock(OrderService.class);
-    private final OrderBookBroadcaster broadcaster = new OrderBookBroadcaster(
-            messagingTemplate,
-            matchingEngine,
-            orderService,
-            new ObjectMapper()
-    );
+    private SimpMessagingTemplate messagingTemplate;
+    private MatchingEngine matchingEngine;
+    private OrderService orderService;
+    private TaskScheduler taskScheduler;
+    private OrderBookBroadcaster broadcaster;
 
     @BeforeEach
     void setUp() {
+        messagingTemplate = mock(SimpMessagingTemplate.class);
+        matchingEngine = mock(MatchingEngine.class);
+        orderService = mock(OrderService.class);
+        taskScheduler = mock(TaskScheduler.class);
+        runScheduledTasksImmediately();
+        broadcaster = new OrderBookBroadcaster(
+                messagingTemplate,
+                matchingEngine,
+                orderService,
+                new ObjectMapper(),
+                taskScheduler,
+                new SimpleMeterRegistry()
+        );
         ReflectionTestUtils.setField(broadcaster, "depth", 20);
+        ReflectionTestUtils.setField(broadcaster, "coalesceDelayMillis", 200L);
     }
 
     @Test
@@ -72,6 +85,29 @@ class OrderBookBroadcasterTest {
     }
 
     @Test
+    void 같은_시장_오더북_이벤트는_지연_시간_동안_마지막_snapshot만_broadcast한다() {
+        doReturn(null).when(taskScheduler).schedule(any(Runnable.class), any(Instant.class));
+        when(orderService.getMarketLock(1L)).thenReturn(new ReentrantLock());
+        when(matchingEngine.getBuySide("BTC-KRW")).thenReturn(List.of(
+                entry(1L, "100000000", "0.0001", 1L)
+        ));
+        when(matchingEngine.getSellSide("BTC-KRW")).thenReturn(List.of());
+
+        broadcaster.onOrderEvent(orderEventMessage(32L, "ORDER_ACCEPTED"));
+        broadcaster.onOrderEvent(orderEventMessage(33L, "ORDER_CANCELED"));
+
+        var taskCaptor = org.mockito.ArgumentCaptor.forClass(Runnable.class);
+        verify(taskScheduler).schedule(taskCaptor.capture(), any(Instant.class));
+        verifyNoInteractions(messagingTemplate);
+
+        taskCaptor.getValue().run();
+
+        var messageCaptor = org.mockito.ArgumentCaptor.forClass(OrderBookSnapshotMessage.class);
+        verify(messagingTemplate).convertAndSend(eq("/topic/orderbook/BTC-KRW"), messageCaptor.capture());
+        assertThat(messageCaptor.getValue().eventId()).isEqualTo(33L);
+    }
+
+    @Test
     void 파싱_실패가_발생해도_예외를_전파하지_않는다() {
         broadcaster.onOrderEvent("{broken-json");
 
@@ -100,5 +136,12 @@ class OrderBookBroadcasterTest {
                   "payload": "{\\"schemaVersion\\":\\"1.0\\",\\"occurredAt\\":\\"2026-05-19T10:00:00Z\\",\\"payload\\":{\\"orderId\\":100}}"
                 }
                 """.formatted(eventId, eventType);
+    }
+
+    private void runScheduledTasksImmediately() {
+        doAnswer(invocation -> {
+            invocation.getArgument(0, Runnable.class).run();
+            return null;
+        }).when(taskScheduler).schedule(any(Runnable.class), any(Instant.class));
     }
 }
