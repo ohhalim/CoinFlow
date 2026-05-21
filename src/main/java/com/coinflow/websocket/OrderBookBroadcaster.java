@@ -2,7 +2,7 @@ package com.coinflow.websocket;
 
 import com.coinflow.market.dto.OrderBookResponse;
 import com.coinflow.order.matching.MatchingEngine;
-import com.coinflow.order.service.OrderService;
+import com.coinflow.order.matching.OrderBookSnapshot;
 import com.coinflow.websocket.dto.KafkaEventMessage;
 import com.coinflow.websocket.dto.OrderBookSnapshotMessage;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -22,7 +22,6 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.locks.ReentrantLock;
 
 @Slf4j
 @Component
@@ -38,7 +37,6 @@ public class OrderBookBroadcaster {
 
     private final SimpMessagingTemplate messagingTemplate;
     private final MatchingEngine matchingEngine;
-    private final OrderService orderService;
     private final ObjectMapper objectMapper;
     private final TaskScheduler broadcastTaskScheduler;
     private final MeterRegistry meterRegistry;
@@ -55,14 +53,12 @@ public class OrderBookBroadcaster {
     public OrderBookBroadcaster(
             SimpMessagingTemplate messagingTemplate,
             MatchingEngine matchingEngine,
-            OrderService orderService,
             ObjectMapper objectMapper,
             @Qualifier("websocketBroadcastTaskScheduler") TaskScheduler broadcastTaskScheduler,
             MeterRegistry meterRegistry
     ) {
         this.messagingTemplate = messagingTemplate;
         this.matchingEngine = matchingEngine;
-        this.orderService = orderService;
         this.objectMapper = objectMapper;
         this.broadcastTaskScheduler = broadcastTaskScheduler;
         this.meterRegistry = meterRegistry;
@@ -125,27 +121,36 @@ public class OrderBookBroadcaster {
 
     private void broadcast(PendingOrderBookEvent event) {
         long startedAt = System.nanoTime();
-        ReentrantLock lock = orderService.getMarketLock(event.marketId());
-        lock.lock();
-        try {
-            OrderBookResponse response = OrderBookResponse.of(
-                    event.marketSymbol(),
-                    matchingEngine.getBuySide(event.marketSymbol()),
-                    matchingEngine.getSellSide(event.marketSymbol()),
-                    normalizedDepth()
-            );
+        OrderBookSnapshot snapshot = snapshotOrderBook(event);
 
-            OrderBookSnapshotMessage message = new OrderBookSnapshotMessage(
-                    event.eventId(),
-                    response.market(),
-                    toPriceLevels(response.bids()),
-                    toPriceLevels(response.asks())
-            );
+        OrderBookResponse response = OrderBookResponse.of(
+                event.marketSymbol(),
+                snapshot.buySide(),
+                snapshot.sellSide(),
+                normalizedDepth()
+        );
+
+        OrderBookSnapshotMessage message = new OrderBookSnapshotMessage(
+                event.eventId(),
+                response.market(),
+                toPriceLevels(response.bids()),
+                toPriceLevels(response.asks())
+        );
+        try {
             messagingTemplate.convertAndSend("/topic/orderbook/" + message.market(), message);
             meterRegistry.counter("websocket.orderbook.broadcast.sent", "market", message.market()).increment();
         } finally {
-            lock.unlock();
             meterRegistry.timer("websocket.orderbook.broadcast.duration", "market", event.marketSymbol())
+                    .record(System.nanoTime() - startedAt, TimeUnit.NANOSECONDS);
+        }
+    }
+
+    private OrderBookSnapshot snapshotOrderBook(PendingOrderBookEvent event) {
+        long startedAt = System.nanoTime();
+        try {
+            return matchingEngine.snapshot(event.marketSymbol());
+        } finally {
+            meterRegistry.timer("websocket.orderbook.snapshot.duration", "market", event.marketSymbol())
                     .record(System.nanoTime() - startedAt, TimeUnit.NANOSECONDS);
         }
     }
