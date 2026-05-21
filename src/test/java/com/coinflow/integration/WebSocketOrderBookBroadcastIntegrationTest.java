@@ -42,7 +42,8 @@ import static org.mockito.Mockito.*;
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties = {
                 "coinflow.websocket.orderbook.enabled=true",
-                "coinflow.websocket.trade-feed.enabled=false"
+                "coinflow.websocket.trade-feed.enabled=false",
+                "coinflow.websocket.orderbook.coalesce-delay-ms=10"
         }
 )
 @EmbeddedKafka(

@@ -6,22 +6,27 @@ import com.coinflow.order.service.OrderService;
 import com.coinflow.websocket.dto.KafkaEventMessage;
 import com.coinflow.websocket.dto.OrderBookSnapshotMessage;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import lombok.RequiredArgsConstructor;
+import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
+import org.springframework.scheduling.TaskScheduler;
 import org.springframework.stereotype.Component;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 
 @Slf4j
 @Component
 @ConditionalOnProperty(name = "coinflow.websocket.orderbook.enabled", havingValue = "true", matchIfMissing = true)
-@RequiredArgsConstructor
 public class OrderBookBroadcaster {
 
     private static final Set<String> ORDERBOOK_TRIGGER_EVENTS = Set.of(
@@ -35,9 +40,33 @@ public class OrderBookBroadcaster {
     private final MatchingEngine matchingEngine;
     private final OrderService orderService;
     private final ObjectMapper objectMapper;
+    private final TaskScheduler broadcastTaskScheduler;
+    private final MeterRegistry meterRegistry;
+
+    private final ConcurrentMap<Long, PendingOrderBookEvent> pendingEvents = new ConcurrentHashMap<>();
+    private final Set<Long> scheduledMarkets = ConcurrentHashMap.newKeySet();
 
     @Value("${coinflow.websocket.orderbook.depth:20}")
     private int depth;
+
+    @Value("${coinflow.websocket.orderbook.coalesce-delay-ms:200}")
+    private long coalesceDelayMillis;
+
+    public OrderBookBroadcaster(
+            SimpMessagingTemplate messagingTemplate,
+            MatchingEngine matchingEngine,
+            OrderService orderService,
+            ObjectMapper objectMapper,
+            @Qualifier("websocketBroadcastTaskScheduler") TaskScheduler broadcastTaskScheduler,
+            MeterRegistry meterRegistry
+    ) {
+        this.messagingTemplate = messagingTemplate;
+        this.matchingEngine = matchingEngine;
+        this.orderService = orderService;
+        this.objectMapper = objectMapper;
+        this.broadcastTaskScheduler = broadcastTaskScheduler;
+        this.meterRegistry = meterRegistry;
+    }
 
     @KafkaListener(
             topics = "${coinflow.outbox.order-topic:coinflow.order.events}",
@@ -50,14 +79,52 @@ public class OrderBookBroadcaster {
                 return;
             }
 
-            broadcast(event);
+            queueBroadcast(event);
         } catch (Exception exception) {
             log.warn("Failed to broadcast orderbook snapshot. rawMessage={}, error={}",
                     rawMessage, exception.getMessage(), exception);
         }
     }
 
-    private void broadcast(KafkaEventMessage event) {
+    private void queueBroadcast(KafkaEventMessage event) {
+        PendingOrderBookEvent pendingEvent = new PendingOrderBookEvent(
+                event.eventId(),
+                event.marketId(),
+                event.marketSymbol()
+        );
+        pendingEvents.put(event.marketId(), pendingEvent);
+        meterRegistry.counter("websocket.orderbook.broadcast.queued", "market", event.marketSymbol()).increment();
+
+        if (scheduledMarkets.add(event.marketId())) {
+            scheduleFlush(event.marketId());
+        } else {
+            meterRegistry.counter("websocket.orderbook.broadcast.coalesced", "market", event.marketSymbol()).increment();
+        }
+    }
+
+    private void scheduleFlush(Long marketId) {
+        broadcastTaskScheduler.schedule(
+                () -> flush(marketId),
+                Instant.now().plusMillis(Math.max(0, coalesceDelayMillis))
+        );
+    }
+
+    private void flush(Long marketId) {
+        PendingOrderBookEvent event = pendingEvents.remove(marketId);
+        scheduledMarkets.remove(marketId);
+        if (event == null) {
+            return;
+        }
+
+        broadcast(event);
+
+        if (pendingEvents.containsKey(marketId) && scheduledMarkets.add(marketId)) {
+            scheduleFlush(marketId);
+        }
+    }
+
+    private void broadcast(PendingOrderBookEvent event) {
+        long startedAt = System.nanoTime();
         ReentrantLock lock = orderService.getMarketLock(event.marketId());
         lock.lock();
         try {
@@ -75,8 +142,11 @@ public class OrderBookBroadcaster {
                     toPriceLevels(response.asks())
             );
             messagingTemplate.convertAndSend("/topic/orderbook/" + message.market(), message);
+            meterRegistry.counter("websocket.orderbook.broadcast.sent", "market", message.market()).increment();
         } finally {
             lock.unlock();
+            meterRegistry.timer("websocket.orderbook.broadcast.duration", "market", event.marketSymbol())
+                    .record(System.nanoTime() - startedAt, TimeUnit.NANOSECONDS);
         }
     }
 
@@ -88,5 +158,12 @@ public class OrderBookBroadcaster {
         return levels.stream()
                 .map(level -> new OrderBookSnapshotMessage.PriceLevel(level.price(), level.quantity()))
                 .toList();
+    }
+
+    private record PendingOrderBookEvent(
+            Long eventId,
+            Long marketId,
+            String marketSymbol
+    ) {
     }
 }

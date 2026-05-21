@@ -914,6 +914,53 @@ TEST_RESULTS에는 아래 항목을 기록한다.
 - Grafana에서 JVM memory, GC, HTTP latency, Hikari connection 관측 결과
 - 현재 병목 또는 한계
 
+### WS-LOAD-004 한계 부하 확장 계획
+
+WebSocket/Kafka 실시간 전파 기능이 붙은 뒤에는 단순 통과 여부보다 어느 부하에서 병목이 생기는지 확인한다.
+
+Baseline:
+
+| subscribers | order rate | 목적 |
+|---:|---:|---|
+| 50 | 50/s | #49 병목 완화 기준선 유지 여부 확인 |
+
+Scale-up:
+
+| subscribers | order rate | 목적 |
+|---:|---:|---|
+| 50 | 100/s | 주문 생성량 증가 시 Outbox backlog 확인 |
+| 100 | 100/s | 구독자 증가에 따른 WebSocket fan-out 영향 확인 |
+| 100 | 200/s | 주문 생성량과 구독자 수가 함께 증가할 때 병목 확인 |
+| 200 | 200/s | 로컬 환경에서의 1차 한계선 탐색 |
+
+Pass criteria:
+
+- `ws_trade_delivery_lag p95 < 1000ms`
+- `ws_trade_delivery_lag p99 < 2000ms`
+- `order_create_duration p95 < 500ms`
+- HTTP failure rate `< 1%`
+- server error `0`
+- Kafka consumer lag `0` 또는 테스트 종료 후 빠르게 해소
+- Outbox unpublished event count `0` 또는 테스트 종료 후 빠르게 해소
+- Hikari pending connection `0`
+- GC pause 급증 없음
+
+Bottleneck 판단 기준:
+
+| 현상 | 우선 의심 지점 |
+|---|---|
+| Outbox unpublished event 증가 | Outbox publisher polling/batch 처리량 |
+| Kafka consumer lag 증가 | Kafka consumer 또는 WebSocket broadcaster 처리량 |
+| Outbox/Kafka 정상, WebSocket lag 증가 | STOMP broadcast fan-out |
+| Hikari pending connection 증가 | DB connection pool 또는 트랜잭션 병목 |
+| GC pause/heap 급증 | snapshot payload 생성 또는 broadcast allocation |
+
+Result table:
+
+| subscribers | order rate | trade lag p95 | trade lag p99 | order p95 | outbox backlog | kafka lag | result |
+|---:|---:|---:|---:|---:|---:|---:|---|
+| TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+
 ## 13. Invariants
 
 모든 통합 테스트 후 아래 불변식을 검증한다.
