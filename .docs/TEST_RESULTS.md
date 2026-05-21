@@ -626,11 +626,62 @@ Finding:
 - `ORDER_RATE=50`에서는 주문/체결당 생성되는 domain event 수가 많아 기존 Outbox 설정(`100 events / 1000ms`)이 이벤트 발행 속도를 따라가지 못했다.
 - Outbox 발행 주기와 batch size를 조정하자 `50 subscribers / 50 order/s`에서도 trade feed p95가 `14.49s`에서 `250ms`로 개선됐다.
 
-## 14. 발견 이슈
+## 14. WebSocket/Kafka 전파 한계 부하 측정
+
+Date: 2026-05-21
+
+Context:
+
+| 항목 | 값 |
+|---|---|
+| Issue | `#50` WebSocket/Kafka 전파 한계 부하 측정 |
+| Branch | `perf/50/websocket-kafka-load-limit` |
+| DB | Local Docker MySQL 8 |
+| Kafka | Local Docker Kafka |
+| App run option | `DEBUG=false` |
+| Notes | 셸 환경의 `DEBUG=release`로 인해 첫 실행은 Spring Boot debug logging이 활성화되어 측정값에서 제외했다. |
+
+Scale-up result:
+
+| Scenario | Status | Created orders | Created trades | Trade messages | OrderBook messages | Trade lag p95 | Trade lag p99 | Order create p95 | Order create p99 | Dropped iterations | HTTP failed | 5xx |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 50 subscribers / 100 order/s | FAIL | 2,882 | 1,441 | 72,050 | 3,150 | 1.23s | 1.44s | 1.64s | 1.72s | 118 | 0.00% | 0 |
+
+Post-run observations:
+
+| 항목 | 관측 |
+|---|---|
+| Outbox unpublished events | `0` |
+| Kafka consumer lag | `0` for `coinflow-websocket` group |
+| Hikari connection | active `0`, pending `0` |
+| `websocket.trade.broadcast.duration` max | `0.0026s` |
+| `websocket.orderbook.broadcast.duration` count / sum / max | `63` / `60.65s` / `1.63s` |
+| Local accumulated data before/after run | users `850`, orders `33,395`, trades `16,684`, domain_events `100,131`, wallet_ledgers `100,981` |
+
+Finding:
+
+- `50 subscribers / 100 order/s`부터 목표 기준을 넘지 못했다.
+- HTTP failure와 5xx는 0이므로 기능 실패가 아니라 지연/처리량 한계다.
+- Outbox backlog와 Kafka consumer lag는 남지 않았다.
+- `websocket.trade.broadcast.duration`은 낮으므로 trade feed 전송 자체가 주 병목은 아니다.
+- `websocket.orderbook.broadcast.duration`이 높게 나타났다. 오더북 snapshot broadcast가 market lock을 잡고 snapshot을 만들면서 주문 생성 경로와 경합하는 것으로 판단한다.
+- 따라서 `100/100`, `100/200`, `200/200` 구간은 같은 병목을 더 크게 만들 가능성이 높아 이번 실행에서는 중단한다.
+
+Next action:
+
+- 오더북 snapshot broadcast가 주문 생성 market lock을 오래 잡지 않도록 구조를 개선한다.
+- 후보:
+  - Kafka Consumer에서 직접 DB snapshot을 만들지 않고, 커밋 후 반영된 in-memory orderbook 기준으로 snapshot 생성
+  - broadcast용 snapshot 생성 lock 범위 축소
+  - orderbook snapshot을 full snapshot이 아니라 delta 또는 bounded depth cache로 전환
+  - 성능 테스트 전용 fresh DB/Kafka 환경을 구성해 누적 데이터 영향을 제거
+
+## 15. 발견 이슈
 
 | ID | Severity | Symptom | Suspected cause | Action |
 |---|---|---|---|---|
 | WS-001 | MAJOR | `ORDER_RATE=50`에서 trade feed p95가 `13s~14s`대로 상승 | Outbox 발행 주기/배치가 domain event 생성 속도를 따라가지 못함 | `#49`에서 Outbox cadence 조정 후 p95 `250ms`로 개선 |
+| WS-002 | MAJOR | `50 subscribers / 100 order/s`에서 order create p95 `1.64s`, trade lag p95 `1.23s` | OrderBook snapshot broadcast가 market lock을 잡고 주문 생성 경로와 경합 | 후속 이슈에서 orderbook broadcast lock 범위/생성 방식 개선 |
 
 Severity:
 
@@ -638,7 +689,7 @@ Severity:
 - `MAJOR`: 5xx, lock timeout, 반복 가능한 성능 병목
 - `MINOR`: 문서/로그/테스트 안정성 개선
 
-## 15. 후속 조치
+## 16. 후속 조치
 
 | Action | Owner | Status | Link |
 |---|---|---|---|
@@ -651,3 +702,5 @@ Severity:
 | Add WebSocket/Kafka realtime propagation load test |  | DONE |  |
 | Expand WebSocket/Kafka propagation load baseline |  | DONE |  |
 | Reduce WebSocket/Kafka propagation bottleneck |  | DONE |  |
+| Measure WebSocket/Kafka propagation load limit |  | DONE |  |
+| Reduce orderbook broadcast lock contention |  | TODO |  |
