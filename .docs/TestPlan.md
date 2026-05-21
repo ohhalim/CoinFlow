@@ -825,7 +825,96 @@ k6 결과는 숫자 자체보다 변화 추적이 중요하다.
 
 결과는 README에 모두 붙이지 않고, [TEST_RESULTS.md](./TEST_RESULTS.md)에 실행 환경과 수치를 요약한다.
 
-## 12. Invariants
+## 12. WebSocket/Kafka Realtime Load Test
+
+WebSocket/Kafka 실시간 전파 부하 테스트는 주문 생성 부하 중 Outbox Publisher, Kafka Consumer, STOMP broadcast가 함께 동작하는지 확인하기 위한 테스트다. HTTP 주문 처리 자체의 성능뿐 아니라 체결 feed와 오더북 snapshot이 부하 상황에서도 수신되는지 기록한다.
+
+### 실행 전제
+
+- 로컬 MySQL, Kafka 실행
+- 애플리케이션 실행
+- WebSocket 체결 feed와 오더북 broadcast 활성화
+- dev-only deposit API 사용 가능
+- Prometheus/Grafana 실행 권장
+
+```bash
+docker compose up -d mysql kafka prometheus grafana
+./gradlew bootRun
+k6 run k6/websocket-kafka-load-test.js
+```
+
+### WS-LOAD-001 STOMP 구독 부하
+
+Scenario:
+
+- `ws://localhost:8080/ws`에 여러 STOMP client를 연결한다.
+- setup에서 생성한 JWT를 WebSocket handshake에 포함해 실제 인증 사용자 흐름으로 연결한다.
+- 각 client가 `/topic/trades/BTC-KRW`, `/topic/orderbook/BTC-KRW`를 구독한다.
+- 주문 생성 부하보다 먼저 구독을 시작하기 위해 warmup 시간을 둔다.
+
+Metrics:
+
+- `ws_connections`
+- `ws_connection_errors`
+- `stomp_subscriptions`
+- `stomp_errors`
+
+Pass criteria:
+
+- WebSocket handshake 실패가 없어야 한다.
+- STOMP ERROR frame이 없어야 한다.
+
+### WS-LOAD-002 주문 생성 중 실시간 전파 확인
+
+Scenario:
+
+- 여러 buyer/seller를 생성하고 KRW/BTC를 준비한다.
+- `BTC-KRW`에 BUY/SELL 지정가 주문을 일정 rate로 생성한다.
+- 체결 발생 시 Kafka `TRADE_CREATED` 이벤트가 `/topic/trades/BTC-KRW`로 전파되는지 확인한다.
+- 주문 생성/체결/취소성 주문 이벤트가 `/topic/orderbook/BTC-KRW` snapshot으로 전파되는지 확인한다.
+
+Metrics:
+
+- `created_orders`
+- `created_trades`
+- `ws_trade_messages`
+- `ws_current_trade_messages`
+- `ws_orderbook_messages`
+- `ws_trade_delivery_lag`
+- `order_create_duration`
+- `server_errors`
+
+Pass criteria:
+
+- `ws_trade_messages > 0`
+- `ws_current_trade_messages > 0`
+- `ws_orderbook_messages > 0`
+- `ws_trade_delivery_lag p95 < 3000ms`
+- `order_create_duration p95 < 1000ms`
+- server error 0건
+
+Note:
+
+- `ws_trade_delivery_lag`는 `TradeFeedMessage.tradedAt`과 client 수신 시각의 차이로 계산한다.
+- 로컬 Kafka/Outbox backlog가 남아 있으면 과거 이벤트가 먼저 전파되어 지연시간이 왜곡될 수 있으므로, 테스트 시작 이후 생성된 trade만 latency 샘플에 포함한다.
+- 오더북 snapshot payload는 현재 발생 시각을 포함하지 않으므로 이번 테스트에서는 수신 여부와 메시지 구조를 검증한다.
+
+### WS-LOAD-003 관측 기록 기준
+
+TEST_RESULTS에는 아래 항목을 기록한다.
+
+- 실행 날짜, branch, commit
+- `DURATION`, `ORDER_RATE`, `WS_SUBSCRIBERS`
+- 생성 주문 수, 생성 체결 수
+- 체결 feed 수신 수, 오더북 snapshot 수신 수
+- `ws_trade_delivery_lag` p90/p95/p99/max
+- 주문 생성 p95
+- HTTP 실패율, 5xx 수
+- Outbox unpublished event count, Kafka consumer lag
+- Grafana에서 JVM memory, GC, HTTP latency, Hikari connection 관측 결과
+- 현재 병목 또는 한계
+
+## 13. Invariants
 
 모든 통합 테스트 후 아래 불변식을 검증한다.
 

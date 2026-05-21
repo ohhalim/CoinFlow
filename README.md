@@ -152,11 +152,13 @@ Grafana에는 `CoinFlow Overview` 대시보드가 자동 등록됩니다.
 - 주문 처리 중 오더북 반복 조회 안정성
 - 주문 취소와 체결 경합 시 최종 상태 정합성
 - k6 기반 주문/조회 API 로컬 부하 테스트
+- k6 기반 WebSocket/Kafka 실시간 전파 부하 테스트
 
 k6 로컬 부하 테스트는 애플리케이션 실행 후 다음 명령으로 실행합니다.
 
 ```bash
 k6 run k6/order-flow-load-test.js
+k6 run k6/websocket-kafka-load-test.js
 ```
 
 WebSocket feed는 STOMP client로 `/ws`에 연결한 뒤 시장별 topic을 구독해 확인합니다.

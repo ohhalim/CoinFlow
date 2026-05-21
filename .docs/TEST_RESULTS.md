@@ -498,11 +498,89 @@ Finding:
 - 기존 Phase 1 정합성 테스트와 WebSocket 체결 E2E 테스트는 회귀 없이 통과했다.
 - WebSocket 인증/권한, 클라이언트 재연결/중복 수신 처리, delta orderbook streaming은 후속 범위로 둔다.
 
-## 12. 발견 이슈
+## 12. WebSocket/Kafka 실시간 전파 부하 테스트
+
+Date: 2026-05-20
+
+Context:
+
+| 항목 | 값 |
+|---|---|
+| Issue | `#48` WebSocket/Kafka 실시간 전파 부하 테스트 |
+| Branch | `test/48/websocket-kafka-load-test` |
+| DB | Local Docker MySQL 8 |
+| Kafka | Local Docker Kafka |
+| Observability | Prometheus / Grafana |
+
+Command:
+
+```bash
+k6 run -e WS_SUBSCRIBERS=5 -e ORDER_RATE=10 k6/websocket-kafka-load-test.js
+k6 run -e WS_SUBSCRIBERS=5 -e ORDER_RATE=30 k6/websocket-kafka-load-test.js
+k6 run -e WS_SUBSCRIBERS=5 -e ORDER_RATE=50 k6/websocket-kafka-load-test.js
+k6 run -e WS_SUBSCRIBERS=20 -e ORDER_RATE=10 k6/websocket-kafka-load-test.js
+k6 run -e WS_SUBSCRIBERS=20 -e ORDER_RATE=30 k6/websocket-kafka-load-test.js
+k6 run -e WS_SUBSCRIBERS=20 -e ORDER_RATE=50 k6/websocket-kafka-load-test.js
+k6 run -e WS_SUBSCRIBERS=50 -e ORDER_RATE=10 k6/websocket-kafka-load-test.js
+k6 run -e WS_SUBSCRIBERS=50 -e ORDER_RATE=30 k6/websocket-kafka-load-test.js
+k6 run -e WS_SUBSCRIBERS=50 -e ORDER_RATE=50 k6/websocket-kafka-load-test.js
+```
+
+Result matrix:
+
+| WS subscribers | ORDER_RATE | Status | Created orders | Created trades | Current trade messages | OrderBook messages | Trade lag p95 | Trade lag p99 | Order create p95 | HTTP failed | 5xx |
+|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 5 | 10 | PASS | 301 | 150 | 750 | 3,005 | 1.03s | 1.06s | 46.70ms | 0.00% | 0 |
+| 5 | 30 | PASS | 901 | 450 | 2,250 | 9,005 | 1.08s | 1.12s | 32.59ms | 0.00% | 0 |
+| 5 | 50 | FAIL | 1,500 | 750 | 2,665 | 10,670 | 13.58s | 14.22s | 24.58ms | 0.00% | 0 |
+| 20 | 10 | PASS | 301 | 150 | 3,000 | 17,340 | 1.04s | 1.07s | 61.13ms | 0.00% | 0 |
+| 20 | 30 | PASS | 900 | 450 | 9,000 | 36,000 | 1.30s | 1.41s | 35.85ms | 0.00% | 0 |
+| 20 | 50 | FAIL | 1,500 | 750 | 10,660 | 42,680 | 14.40s | 15.06s | 25.68ms | 0.00% | 0 |
+| 50 | 10 | PASS | 301 | 150 | 7,500 | 43,350 | 1.05s | 1.08s | 59.22ms | 0.00% | 0 |
+| 50 | 30 | PASS | 893 | 446 | 22,300 | 89,250 | 2.10s | 2.28s | 44.05ms | 0.00% | 0 |
+| 50 | 50 | FAIL | 1,501 | 750 | 26,050 | 104,200 | 14.49s | 15.11s | 29.75ms | 0.00% | 0 |
+
+Note:
+
+- FAIL은 API 실패가 아니라 `ws_trade_delivery_lag p95 < 3000ms` 기준 초과를 의미한다.
+- `WS_SUBSCRIBERS=50`, `ORDER_RATE=30`에서는 k6 `dropped_iterations=8`이 발생했다.
+- `ORDER_RATE=50` 구간은 주문 생성과 DB 정합성은 유지되지만, 40초 WebSocket subscriber window 안에서 실시간 전파가 밀린다.
+
+Verified scope:
+
+- STOMP client가 `/ws`에 연결한다.
+- `/topic/trades/BTC-KRW`, `/topic/orderbook/BTC-KRW`를 구독한다.
+- 주문 생성 부하 중 Kafka Consumer 기반 WebSocket broadcast를 수신한다.
+- WebSocket handshake는 k6 setup에서 생성한 JWT를 사용해 실제 인증 사용자 흐름으로 검증한다.
+- 체결 feed는 `tradedAt` 기준 수신 지연을 측정한다. 단, 로컬 Kafka/Outbox backlog로 인한 왜곡을 피하기 위해 테스트 시작 이후 생성된 trade만 latency 샘플에 포함한다.
+- 오더북 snapshot은 수신 여부와 메시지 구조를 검증한다.
+
+Grafana observations:
+
+| 항목 | 관측 |
+|---|---|
+| Outbox unpublished events | `0` |
+| Kafka consumer lag | `0` for `coinflow-websocket` group |
+| JVM heap used max over 30m | about `269.68 MiB` (`282773992 bytes`) |
+| GC pause max over 30m | `0.023s` |
+| HTTP latency | Prometheus p95 over 30m about `52.58ms`; k6 order create p95 max `61.13ms` |
+| Hikari connection | active max `2`, pending max `0` |
+| 5xx increase over 30m | `0`; k6 `server_errors=0` |
+
+Finding:
+
+- WebSocket handshake, STOMP subscribe, Kafka Consumer broadcast, client receive path가 로컬 부하에서 동작했다.
+- `ORDER_RATE=30`, `WS_SUBSCRIBERS=50`까지는 trade feed p95 `2.10s`, p99 `2.28s`로 기준을 통과했다.
+- `ORDER_RATE=50`에서는 subscriber 수와 관계없이 trade feed p95가 `13s~14s`대로 상승했다.
+- Outbox/Kafka backlog는 테스트 종료 시점에 남지 않았으므로, 병목은 영구 적체보다는 테스트 window 안에서 Kafka Consumer -> WebSocket broadcast 전파가 따라가지 못하는 구간으로 판단한다.
+- HTTP 실패율과 5xx는 0이므로, 현재 한계는 주문 API 처리보다 실시간 전파 경로에 있다.
+- 앱 재기동 직후 Kafka/Outbox에 과거 이벤트 backlog가 남아 있으면 첫 실행의 `ws_trade_delivery_lag`가 크게 튈 수 있다. 기준선 측정은 backlog를 비운 뒤 또는 fresh Kafka/DB 환경에서 실행한다.
+
+## 13. 발견 이슈
 
 | ID | Severity | Symptom | Suspected cause | Action |
 |---|---|---|---|---|
-|  |  |  |  |  |
+| WS-001 | MAJOR | `ORDER_RATE=50`에서 trade feed p95가 `13s~14s`대로 상승 | Kafka Consumer -> WebSocket broadcast 처리량이 주문 생성 속도를 따라가지 못함 | Outbox publish cadence, Consumer batch/worker, WebSocket broadcast executor 분리 검토 |
 
 Severity:
 
@@ -510,7 +588,7 @@ Severity:
 - `MAJOR`: 5xx, lock timeout, 반복 가능한 성능 병목
 - `MINOR`: 문서/로그/테스트 안정성 개선
 
-## 13. 후속 조치
+## 14. 후속 조치
 
 | Action | Owner | Status | Link |
 |---|---|---|---|
@@ -520,3 +598,5 @@ Severity:
 | Add Kafka Consumer WebSocket trade feed |  | DONE |  |
 | Add WebSocket STOMP receive E2E test |  | DONE |  |
 | Add WebSocket orderbook snapshot broadcast |  | DONE |  |
+| Add WebSocket/Kafka realtime propagation load test |  | DONE |  |
+| Expand WebSocket/Kafka propagation load baseline |  | DONE |  |
