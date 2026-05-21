@@ -907,9 +907,10 @@ TEST_RESULTS에는 아래 항목을 기록한다.
 - `DURATION`, `ORDER_RATE`, `WS_SUBSCRIBERS`
 - 생성 주문 수, 생성 체결 수
 - 체결 feed 수신 수, 오더북 snapshot 수신 수
-- `ws_trade_delivery_lag` p90/p95/max
+- `ws_trade_delivery_lag` p90/p95/p99/max
 - 주문 생성 p95
 - HTTP 실패율, 5xx 수
+- Outbox unpublished event count, Kafka consumer lag
 - Grafana에서 JVM memory, GC, HTTP latency, Hikari connection 관측 결과
 - 현재 병목 또는 한계
 

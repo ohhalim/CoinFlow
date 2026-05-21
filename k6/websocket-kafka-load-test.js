@@ -35,6 +35,7 @@ const tradeDeliveryLag = new Trend('ws_trade_delivery_lag', true);
 const orderCreateDuration = new Trend('order_create_duration', true);
 
 export const options = {
+  summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)', 'p(99)'],
   scenarios: {
     websocket_subscribers: {
       executor: 'constant-vus',
