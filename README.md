@@ -204,6 +204,52 @@ After:
 - 다만 Order API latency max는 `3.11s`로 남아 있어, 주문 생성 지연의 전체 원인은 아직 해결되지 않았습니다.
 - 후속 병목은 주문 생성 트랜잭션의 market lock, DB pessimistic lock, transaction hold time으로 분리했습니다.
 
+### 4. 주문 생성 경로 병목 재분석
+
+문제 상황:
+
+- 오더북 브로드캐스트 락 경합 제거 이후에도 `50 subscribers / 100 order/s` 조건에서 Order API latency가 남았습니다.
+- 주문 생성 경로의 `market_lock_wait`, `transaction_template`, DB lock, 오더북 반영 시간을 분리하지 않으면 Kafka/WebSocket 병목과 주문 생성 병목을 구분하기 어려웠습니다.
+
+관측 방법:
+
+- 주문 생성 내부 구간을 Micrometer timer로 분리했습니다.
+- `clientOrderId` 사전 중복 조회를 market lock 밖으로 이동하고, DB unique constraint 기반 중복 방어를 유지했습니다.
+- 동일 조건을 5분으로 확장해 순간 성능이 아니라 유지 가능한 처리량을 측정했습니다.
+
+Before:
+
+![Before order create lock scope 5m load test](.docs/images/order-create-lock-scope-before-5m.png)
+
+After:
+
+![After order create lock scope 5m load test](.docs/images/order-create-lock-scope-after-5m.png)
+
+전후 비교:
+
+| Metric | Before | After |
+|---|---:|---:|
+| Scenario | `50 subscribers / 100 order/s / 5m` | `50 subscribers / 100 order/s / 5m` |
+| Created orders | `18,805` | `25,419` |
+| Created trades | `9,402` | `12,709` |
+| Actual order throughput | `56.56 order/s` | `76.80 order/s` |
+| Dropped iterations | `11,196` | `4,582` |
+| HTTP failed / 5xx | `0.00%` / `0` | `0.00%` / `0` |
+| WebSocket / STOMP errors | `0` | `0` |
+| Kafka consumer lag | `0` | `0` |
+| Order create p95 / p99 / max | `2.88s` / `3.15s` / `3.48s` | `2.63s` / `3.57s` / `7.35s` |
+| Trade delivery lag p95 / p99 | `279ms` / `297ms` | `2.20s` / `3.35s` |
+| `market_lock_wait` max | `3.0458s` | `397.38ms` |
+| `transaction_template` max | `55.996ms` | `3.7715s` |
+| `total` max | `3.0575s` | `5.1223s` |
+
+인사이트:
+
+- `market_lock_wait max`는 `3.0458s`에서 `397.38ms`로 감소했습니다.
+- 실제 주문 처리량은 `56.56 order/s`에서 `76.80 order/s`로 증가했고, dropped iteration은 `11,196`에서 `4,582`로 감소했습니다.
+- Kafka consumer lag, HTTP 5xx, WebSocket/STOMP error는 모두 0으로 유지됐습니다.
+- 후속 병목은 `transaction_template max 3.7715s`로 이동했으며, 주문 생성 트랜잭션 점유 시간과 DB connection pool 대기 가능성을 다음 개선 범위로 분리했습니다.
+
 상세 실행 결과는 [Test Results](.docs/TEST_RESULTS.md)에 기록했습니다.
 
 ## 트러블 슈팅
