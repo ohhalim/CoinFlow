@@ -724,6 +724,32 @@ Before / after comparison:
 | 50 subscribers / 100 order/s | Before `#51` | 2,882 | 1,441 | 1.23s | 1.44s | 1.64s | 1.72s | 118 | 1.63s | - |
 | 50 subscribers / 100 order/s | After lock contention fix | 2,917 | 1,458 | 290ms | 302ms | 1.22s | 1.29s | 84 | 0.0040s | 0.00047s |
 
+Capture correlation 기준:
+
+| 구분 | 값 |
+|---|---|
+| Before capture range | `2026-05-22 14:33:30 ~ 14:35:10 KST` |
+| After capture range | `2026-05-22 14:53:00 ~ 14:54:15 KST` |
+| Before k6 summary | `/private/tmp/k6-before-orderbook-lock-rerun.json` |
+| After k6 summary | `/private/tmp/k6-after-orderbook-lock-rerun.json` |
+| Before Prometheus scrape | `/private/tmp/coinflow-metrics-before-rerun.txt` |
+| After Prometheus scrape | `/private/tmp/coinflow-metrics-after-rerun.txt` |
+
+동일 조건 재측정:
+
+| Scenario | Change point | Created orders | Created trades | Trade lag p95 | Trade lag p99 | Order create p95 | Order create p99 | Dropped iterations | OrderBook broadcast count / sum / max | OrderBook snapshot max |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 50 subscribers / 100 order/s | Before `#51` | 2,712 | 1,356 | 2.012s | 2.219s | 2.434s | 2.466s | 289 | 54 / 60.617s / 2.4019s | - |
+| 50 subscribers / 100 order/s | After lock contention fix | 2,523 | 1,261 | 284ms | 309ms | 2.806s | 3.078s | 478 | 114 / 0.044s / 0.0044s | 0.00056s |
+
+동일 조건 재측정 해석:
+
+- `websocket.orderbook.broadcast.duration`은 sum `60.617s -> 0.044s`, max `2.4019s -> 0.0044s`로 감소했다.
+- `ws_trade_delivery_lag` p95는 `2.012s -> 284ms`로 감소했다.
+- Outbox unpublished event, Kafka consumer lag, Hikari pending connection은 before/after 모두 `0`으로 확인했다.
+- 주문 생성 p95는 `2.434s -> 2.806s`로 개선되지 않았다. 따라서 after 재측정 기준의 주문 생성 지연은 오더북 broadcast lock 경합만으로 설명하지 않는다.
+- 후속 분석 범위는 성능 테스트 전용 fresh DB/Kafka 환경 구성, market lock 보유 시간, DB pessimistic lock 대기, 트랜잭션 hold time 계측으로 분리한다.
+
 Post-run observations:
 
 | 항목 | 관측 |
