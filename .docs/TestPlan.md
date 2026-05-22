@@ -961,7 +961,68 @@ Result table:
 |---:|---:|---:|---:|---:|---:|---:|---|
 | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
 
-## 13. Invariants
+## 13. Order Create Lock Metrics
+
+주문 생성 부하가 커질 때 HTTP latency만으로는 병목 위치를 특정하기 어렵다. 주문 생성 경로를 단계별로 계측하여 market lock, DB 트랜잭션, wallet/order lock, matching, settlement, orderbook 반영 중 어느 구간이 지연을 만든 것인지 분리해 확인한다.
+
+Metric:
+
+- `order.create.stage.duration`
+
+Tags:
+
+- `market`
+- `side`
+- `stage`
+
+Stage 기준:
+
+| stage | 의미 |
+|---|---|
+| `market_lock_wait` | market별 순서 보장 lock 획득 대기 시간 |
+| `market_lock_hold` | market lock을 보유한 전체 시간 |
+| `transaction_template` | 주문 생성 DB 트랜잭션 실행 시간 |
+| `client_order_id_check` | client order id 중복 검증 시간 |
+| `self_trade_check` | 자전거래 방지 검증 시간 |
+| `sequence_lock` | market sequence 잠금 및 증가 시간 |
+| `taker_wallet_lock` | taker wallet 잠금 시간 |
+| `maker_order_lock` | maker order pessimistic lock 시간 |
+| `settlement_wallet_lock` | 체결 정산 대상 wallet lock 시간 |
+| `matching_plan` | 인메모리 orderbook 매칭 계획 생성 시간 |
+| `settlement` | 체결 저장, 주문 상태 변경, 지갑 정산 시간 |
+| `orderbook_after_commit` | DB commit 이후 orderbook 반영 시간 |
+| `total` | 주문 생성 요청 전체 처리 시간 |
+
+측정 시나리오:
+
+| subscribers | order rate | duration | 목적 |
+|---:|---:|---:|---|
+| 50 | 100/s | 30s | #51 개선 이후 남은 주문 생성 병목 구간 확인 |
+
+Grafana 확인 항목:
+
+- `Order Create Stage Max`
+- `Order Create Stage Average`
+- `Order Create Lock Stage Max`
+- `Order API Latency Max`
+- `OrderBook Broadcast Duration`
+- `Hikari Active / Pending`
+- `Kafka Consumer Lag`
+- `JVM GC Pause Max`
+
+Bottleneck 판단 기준:
+
+| 현상 | 우선 의심 지점 |
+|---|---|
+| `market_lock_wait` 증가 | 동일 market 주문 직렬화 경합 |
+| `market_lock_hold` 증가 | lock 내부 작업량 증가 또는 후속 단계 병목 |
+| `transaction_template` 증가 | DB 트랜잭션 전체 병목 |
+| `taker_wallet_lock`, `maker_order_lock`, `settlement_wallet_lock` 증가 | DB row lock 경합 |
+| `matching_plan` 증가 | 인메모리 orderbook 매칭 비용 |
+| `settlement` 증가 | trade/order/wallet/ledger 저장 및 정산 병목 |
+| `orderbook_after_commit` 증가 | commit 이후 orderbook 반영 비용 |
+
+## 14. Invariants
 
 모든 통합 테스트 후 아래 불변식을 검증한다.
 

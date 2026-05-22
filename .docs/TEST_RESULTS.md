@@ -778,13 +778,101 @@ Next action:
 - 매칭 계획 생성, DB 정산, 인메모리 오더북 반영 구간별 시간을 분리한다.
 - 같은 `50 subscribers / 100 order/s` 조건에서 order create p95 `1s` 미만 달성을 목표로 재측정한다.
 
-## 16. 발견 이슈
+## 16. 주문 생성 경로 단계별 계측
+
+Date: 2026-05-22
+
+Context:
+
+| 항목 | 값 |
+|---|---|
+| Issue | `#52` 주문 생성 경로 lock/transaction 병목 계측 |
+| Branch | `perf/52/order-create-lock-metrics` |
+| DB | Local Docker MySQL 8 |
+| Kafka | Local Docker Kafka |
+| App run option | `DEBUG=false` |
+| Prometheus target | `up{job="coinflow"} = 1` |
+
+Changes:
+
+- 주문 생성 경로에 `order.create.stage.duration` Micrometer timer를 추가했다.
+- `market_lock_wait`, `market_lock_hold`, `transaction_template`, `taker_wallet_lock`, `maker_order_lock`, `settlement_wallet_lock`, `matching_plan`, `settlement`, `orderbook_after_commit`, `total` 구간을 분리했다.
+- Grafana에 `Order Create Stage Max`, `Order Create Stage Average`, `Order Create Lock Stage Max` 패널을 추가했다.
+
+Verification:
+
+```bash
+./gradlew test
+WS_SUBSCRIBERS=50 ORDER_RATE=100 DURATION=30s ORDER_VUS=20 ORDER_MAX_VUS=80 BUYER_COUNT=20 SELLER_COUNT=20 k6 run k6/websocket-kafka-load-test.js
+```
+
+Note:
+
+- 첫 k6 실행은 샌드박스 네트워크 제한으로 `operation not permitted`가 발생하여 측정값에서 제외했다.
+- 권한 허용 후 동일 조건으로 재실행한 결과만 유효 측정으로 기록한다.
+
+Result:
+
+| 항목 | 결과 |
+|---|---:|
+| Full regression test | Passed |
+| k6 scenario status | FAIL: `order_create_duration p95 < 1000ms` 초과 |
+| HTTP failed | `0.00%` |
+| 5xx | `0` |
+| Checks | `300,899 / 300,899` passed |
+| Created orders | `2,744` |
+| Created trades | `1,372` |
+| Dropped iterations | `256` |
+| WebSocket connections | `50` |
+| Trade messages | `68,600` |
+| OrderBook messages | `5,200` |
+| Trade delivery lag p95 / p99 | `289ms` / `309ms` |
+| Order create p95 / p99 | `1.00s` / `1.19s` |
+| HTTP request p95 / p99 | `993.02ms` / `1.19s` |
+
+Order create stage max:
+
+| stage | max |
+|---|---:|
+| `total` | `1.2448s` |
+| `market_lock_wait` | `1.2319s` |
+| `market_lock_hold` | `55.33ms` |
+| `transaction_template` | `55.33ms` |
+| `transaction_callback` | `50.71ms` |
+| `settlement` | `47.02ms` |
+| `client_order_id_check` | `13.24ms` |
+| `taker_wallet_lock` | `12.48ms` |
+| `settlement_wallet_lock` | `12.02ms` |
+| `order_save` | `9.14ms` |
+| `order_lock_ledger_save` | `7.36ms` |
+| `maker_order_lock` | `6.17ms` |
+| `sequence_lock` | `6.15ms` |
+| `orderbook_after_commit` | `1.75ms` |
+| `matching_plan` | `0.58ms` |
+| `self_trade_check` | `0.10ms` |
+
+Finding:
+
+- 기능 실패 없이 주문 생성, 체결, WebSocket trade/orderbook 전파가 동작했다.
+- WebSocket trade delivery lag p95는 `289ms`로 기준을 만족했다.
+- 주문 생성 p95는 `1.00s`로 임계값을 초과했고, `dropped_iterations`가 `256` 발생했다.
+- `total max 1.2448s` 중 `market_lock_wait max 1.2319s`가 대부분을 차지했다.
+- `transaction_template max 55.33ms`, `settlement max 47.02ms`, `orderbook_after_commit max 1.75ms`로 측정되어 DB 정산, 체결 저장, 오더북 반영은 주 병목으로 보이지 않는다.
+- 현재 병목은 동일 market 주문을 단일 lock으로 직렬화하는 구조의 대기 시간으로 판단한다.
+
+Next action:
+
+- market 단일 lock 범위 축소 가능성을 검토한다.
+- 주문 생성 경로에서 market sequence 발급, taker 주문 저장, matching/settlement의 직렬화 필요 범위를 분리한다.
+- 동일 조건에서 `market_lock_wait`와 `order_create_duration p95` 감소 여부를 재측정한다.
+
+## 17. 발견 이슈
 
 | ID | Severity | Symptom | Suspected cause | Action |
 |---|---|---|---|---|
 | WS-001 | MAJOR | `ORDER_RATE=50`에서 trade feed p95가 `13s~14s`대로 상승 | Outbox 발행 주기/배치가 domain event 생성 속도를 따라가지 못함 | `#49`에서 Outbox cadence 조정 후 p95 `250ms`로 개선 |
 | WS-002 | MAJOR | `50 subscribers / 100 order/s`에서 orderbook broadcast max `1.63s`, trade lag p95 `1.23s` | OrderBook snapshot broadcast가 market lock을 잡고 주문 생성 경로와 경합 | `#51`에서 market lock 의존 제거 후 orderbook broadcast max `0.0040s`, trade lag p95 `290ms`로 개선 |
-| ORD-001 | MAJOR | `50 subscribers / 100 order/s`에서 order create p95가 `1.22s`로 남음 | 주문 생성 경로의 per-market 직렬화, DB pessimistic lock, 트랜잭션 hold time | 후속 이슈에서 주문 생성 구간별 계측 및 lock hold time 축소 |
+| ORD-001 | MAJOR | `50 subscribers / 100 order/s`에서 order create p95가 `1s`로 남고 dropped iteration `256` 발생 | `market_lock_wait max 1.2319s`; 동일 market 주문 직렬화 대기 | market lock 범위 축소 및 주문 생성 직렬화 구간 재설계 |
 
 Severity:
 
@@ -792,7 +880,7 @@ Severity:
 - `MAJOR`: 5xx, lock timeout, 반복 가능한 성능 병목
 - `MINOR`: 문서/로그/테스트 안정성 개선
 
-## 17. 후속 조치
+## 18. 후속 조치
 
 | Action | Owner | Status | Link |
 |---|---|---|---|
@@ -807,4 +895,5 @@ Severity:
 | Reduce WebSocket/Kafka propagation bottleneck |  | DONE |  |
 | Measure WebSocket/Kafka propagation load limit |  | DONE |  |
 | Reduce orderbook broadcast lock contention |  | DONE |  |
-| Measure and reduce order creation transaction lock contention |  | TODO |  |
+| Measure order creation lock contention |  | DONE |  |
+| Reduce market lock wait contention |  | TODO |  |
