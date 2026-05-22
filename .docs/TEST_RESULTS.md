@@ -866,13 +866,104 @@ Next action:
 - 주문 생성 경로에서 market sequence 발급, taker 주문 저장, matching/settlement의 직렬화 필요 범위를 분리한다.
 - 동일 조건에서 `market_lock_wait`와 `order_create_duration p95` 감소 여부를 재측정한다.
 
-## 17. 발견 이슈
+## 17. 주문 생성 market lock 범위 축소 재측정
+
+Date: 2026-05-22
+
+Context:
+
+| 항목 | 값 |
+|---|---|
+| Issue | `#57` 주문 생성 market lock 범위 축소 |
+| Branch | `perf/57/order-create-lock-scope` |
+| DB | Local Docker MySQL 8 |
+| Kafka | Local Docker Kafka |
+| App run option | `DEBUG=false` |
+| Prometheus target | `up{job="coinflow"} = 1` |
+| Before capture | `.docs/images/order-create-lock-scope-before-5m.png` |
+| After capture | `.docs/images/order-create-lock-scope-after-5m.png` |
+
+Changes:
+
+- `clientOrderId` 사전 중복 조회를 market lock 밖으로 이동했다.
+- DB unique constraint 기반 중복 방어를 `DataIntegrityViolationException` 매핑으로 보강했다.
+- market lock release를 transaction `afterCompletion`으로 명시해 DB commit 및 `afterCommit` 오더북 반영 이후에만 해제한다.
+- `applyMatchPlan`은 기존과 같이 `afterCommit`에서 수행해 DB commit 전 인메모리 오더북 반영을 방지한다.
+
+Verification:
+
+```bash
+./gradlew test
+WS_SUBSCRIBERS=50 ORDER_RATE=100 DURATION=5m ORDER_VUS=40 ORDER_MAX_VUS=160 BUYER_COUNT=40 SELLER_COUNT=40 k6 run k6/websocket-kafka-load-test.js
+```
+
+Result:
+
+| 항목 | Before | After |
+|---|---:|---:|
+| Full regression test | - | Passed |
+| k6 scenario status | FAIL: `order_create_duration p95 < 1000ms` 초과 | FAIL: `order_create_duration p95 < 1000ms` 초과 |
+| HTTP failed | `0.00%` | `0.00%` |
+| 5xx | `0` | `0` |
+| Checks | `2,136,781 / 2,136,781` passed | `2,669,609 / 2,669,609` passed |
+| Created orders | `18,805` | `25,419` |
+| Created trades | `9,402` | `12,709` |
+| Actual order throughput | `56.56 order/s` | `76.80 order/s` |
+| Dropped iterations | `11,196` | `4,582` |
+| WebSocket connections | `50` | `50` |
+| Trade messages | `470,100` | `635,450` |
+| OrderBook messages | `54,600` | `19,150` |
+| Trade delivery lag p95 / p99 / max | `279ms` / `297ms` / `345ms` | `2.20s` / `3.35s` / `5.37s` |
+| Order create p95 / p99 / max | `2.88s` / `3.15s` / `3.48s` | `2.63s` / `3.57s` / `7.35s` |
+| HTTP request p95 / p99 / max | `2.87s` / `3.15s` / `3.48s` | `2.62s` / `3.57s` / `7.35s` |
+| Kafka consumer lag | `0` | `0` |
+
+Order create stage max:
+
+| stage | Before max | After max |
+|---|---:|---:|
+| `total` | `3.0575s` | `5.1223s` |
+| `market_lock_wait` | `3.0458s` | `397.38ms` |
+| `market_lock_hold` | `56.01ms` | `82.66ms` |
+| `transaction_template` | `56.00ms` | `3.7715s` |
+| `transaction_callback` | `42.65ms` | `411.56ms` |
+| `settlement` | `35.93ms` | `69.79ms` |
+| `taker_wallet_lock` | `12.48ms` | `29.79ms` |
+| `settlement_wallet_lock` | `14.26ms` | `14.03ms` |
+| `sequence_lock` | `10.49ms` | `18.52ms` |
+| `client_order_id_check` | `11.62ms` | `16.38ms` |
+| `order_lock_ledger_save` | `10.79ms` | `20.98ms` |
+| `order_save` | `10.21ms` | `10.92ms` |
+| `maker_order_lock` | `9.51ms` | `8.37ms` |
+| `orderbook_after_commit` | `0.64ms` | `1.32ms` |
+| `matching_plan` | `0.61ms` | `0.48ms` |
+| `self_trade_check` | `0.16ms` | `0.32ms` |
+
+Finding:
+
+- WebSocket/Kafka 전파 경로는 5분 부하에서도 유실 없이 동작했다.
+- 주문 실패, 5xx, STOMP error, WebSocket connection error는 모두 0으로 관측됐다.
+- Kafka consumer lag는 0으로 유지되어 이벤트 전파 backlog는 병목으로 보지 않는다.
+- `market_lock_wait max`는 `3.0458s`에서 `397.38ms`로 감소했다.
+- 실제 주문 처리량은 `56.56 order/s`에서 `76.80 order/s`로 증가했다.
+- `dropped_iterations`는 `11,196`에서 `4,582`로 감소했다.
+- 개선 후 `transaction_template max`가 `3.7715s`까지 상승해 DB connection pool 대기 또는 트랜잭션 점유 시간이 다음 병목으로 판단된다.
+- 100 order/s를 5분 유지하는 조건에서는 아직 p95 1초 기준을 통과하지 못했다.
+
+Next action:
+
+- 주문 생성 트랜잭션 내부 DB 접근 순서와 connection 점유 시간을 줄인다.
+- 정산 저장, 원장 저장, 이벤트 저장을 포함한 transaction scope를 재검토한다.
+- 성능 테스트 전용 fresh DB/Kafka 환경에서 동일 조건을 재측정한다.
+
+## 18. 발견 이슈
 
 | ID | Severity | Symptom | Suspected cause | Action |
 |---|---|---|---|---|
 | WS-001 | MAJOR | `ORDER_RATE=50`에서 trade feed p95가 `13s~14s`대로 상승 | Outbox 발행 주기/배치가 domain event 생성 속도를 따라가지 못함 | `#49`에서 Outbox cadence 조정 후 p95 `250ms`로 개선 |
 | WS-002 | MAJOR | `50 subscribers / 100 order/s`에서 orderbook broadcast max `1.63s`, trade lag p95 `1.23s` | OrderBook snapshot broadcast가 market lock을 잡고 주문 생성 경로와 경합 | `#51`에서 market lock 의존 제거 후 orderbook broadcast max `0.0040s`, trade lag p95 `290ms`로 개선 |
-| ORD-001 | MAJOR | `50 subscribers / 100 order/s`에서 order create p95가 `1s`로 남고 dropped iteration `256` 발생 | `market_lock_wait max 1.2319s`; 동일 market 주문 직렬화 대기 | market lock 범위 축소 및 주문 생성 직렬화 구간 재설계 |
+| ORD-001 | MAJOR | `50 subscribers / 100 order/s`에서 order create p95가 `1s`로 남고 dropped iteration `256` 발생 | `market_lock_wait max 1.2319s`; 동일 market 주문 직렬화 대기 | `#57`에서 clientOrderId 조회를 market lock 밖으로 이동 |
+| ORD-002 | MAJOR | `50 subscribers / 100 order/s / 5m`에서 order create p95 `2.63s`, dropped iteration `4,582` 발생 | `transaction_template max 3.7715s`, Hikari pending 상승 | 주문 생성 transaction scope 및 DB connection 점유 시간 축소 |
 
 Severity:
 
@@ -880,7 +971,7 @@ Severity:
 - `MAJOR`: 5xx, lock timeout, 반복 가능한 성능 병목
 - `MINOR`: 문서/로그/테스트 안정성 개선
 
-## 18. 후속 조치
+## 19. 후속 조치
 
 | Action | Owner | Status | Link |
 |---|---|---|---|
@@ -896,4 +987,5 @@ Severity:
 | Measure WebSocket/Kafka propagation load limit |  | DONE |  |
 | Reduce orderbook broadcast lock contention |  | DONE |  |
 | Measure order creation lock contention |  | DONE |  |
-| Reduce market lock wait contention |  | TODO |  |
+| Reduce market lock wait contention |  | DONE |  |
+| Reduce order transaction hold time |  | TODO |  |

@@ -11,7 +11,15 @@ import java.time.LocalDateTime;
 @Getter
 @Entity
 @NoArgsConstructor
-@Table(name = "orders")
+@Table(
+        name = "orders",
+        uniqueConstraints = {
+                @UniqueConstraint(
+                        name = "uq_orders_user_client_order",
+                        columnNames = {"user_id", "client_order_id"}
+                )
+        }
+)
 public class    Order {
 
     @Id

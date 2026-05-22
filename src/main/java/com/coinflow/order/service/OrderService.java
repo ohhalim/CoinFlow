@@ -26,6 +26,7 @@ import com.coinflow.wallet.repository.WalletLedgerRepository;
 import com.coinflow.wallet.repository.WalletRepository;
 import lombok.extern.slf4j.Slf4j;
 import com.coinflow.common.pagination.OffsetBasedPageRequest;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
@@ -97,17 +98,12 @@ public class OrderService {
         CreateOrderCommand command = orderCreateValidator.validate(market, request);
         OrderSide side = command.side();
 
-        // 3. 시장별 lock 획득
-        ReentrantLock marketLock = marketOrderLockManager.getLock(market.getId());
-        long marketLockWaitStartedAt = System.nanoTime();
-        marketLock.lock();
-        long marketLockAcquiredAt = System.nanoTime();
-        stageRecorder.record(market.getSymbol(), side, "market_lock_wait",
-                marketLockAcquiredAt - marketLockWaitStartedAt);
         try {
             return stageRecorder.record(market.getSymbol(), side, "transaction_template", () ->
                     transactionTemplate.execute(status -> {
                 long transactionCallbackStartedAt = System.nanoTime();
+                MarketLockScope marketLockScope = null;
+                boolean releaseRegistered = false;
                 try {
 
                 // clientOrderId 중복 검증
@@ -120,6 +116,8 @@ public class OrderService {
                         throw new ApiException(ErrorCode.DUPLICATE_CLIENT_ORDER_ID);
                     }
                 }
+
+                marketLockScope = acquireMarketLock(market, side);
 
                 // self-trade 사전 검증 (MAT-006)
                 boolean hasSelfTrade = stageRecorder.record(
@@ -166,6 +164,7 @@ public class OrderService {
                 );
 
                 // 커밋 성공 후 오더북 반영 — DB 롤백 시 큐는 그대로
+                MarketLockScope finalMarketLockScope = marketLockScope;
                 TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
                     @Override
                     public void afterCommit() {
@@ -182,20 +181,31 @@ public class OrderService {
                                     System.nanoTime() - orderBookApplyStartedAt);
                         }
                     }
+
+                    @Override
+                    public void afterCompletion(int status) {
+                        finalMarketLockScope.release();
+                    }
                 });
+                releaseRegistered = true;
 
                 return CreateOrderResponse.of(order, trades);
                 } finally {
                     stageRecorder.record(market.getSymbol(), side, "transaction_callback",
                             System.nanoTime() - transactionCallbackStartedAt);
+                    if (marketLockScope != null && !releaseRegistered) {
+                        marketLockScope.release();
+                    }
                 }
             }));
+        } catch (DataIntegrityViolationException e) {
+            if (request.clientOrderId() != null && isDuplicateClientOrderId(e)) {
+                throw new ApiException(ErrorCode.DUPLICATE_CLIENT_ORDER_ID);
+            }
+            throw e;
         } finally {
-            stageRecorder.record(market.getSymbol(), side, "market_lock_hold",
-                    System.nanoTime() - marketLockAcquiredAt);
             stageRecorder.record(market.getSymbol(), side, "total",
                     System.nanoTime() - createStartedAt);
-            marketLock.unlock();
         }
     }
 
@@ -269,4 +279,45 @@ public class OrderService {
         return orders.stream().map(OrderSummaryResponse::from).toList();
     }
 
+    private MarketLockScope acquireMarketLock(Market market, OrderSide side) {
+        ReentrantLock marketLock = marketOrderLockManager.getLock(market.getId());
+        long marketLockWaitStartedAt = System.nanoTime();
+        marketLock.lock();
+        long marketLockAcquiredAt = System.nanoTime();
+        stageRecorder.record(market.getSymbol(), side, "market_lock_wait",
+                marketLockAcquiredAt - marketLockWaitStartedAt);
+        return new MarketLockScope(market.getSymbol(), side, marketLock, marketLockAcquiredAt);
+    }
+
+    private boolean isDuplicateClientOrderId(DataIntegrityViolationException e) {
+        String message = e.getMostSpecificCause().getMessage();
+        return message != null && (
+                message.contains("uq_orders_user_client_order")
+                        || message.contains("uk_orders_user_client_order_id")
+        );
+    }
+
+    private class MarketLockScope {
+        private final String marketSymbol;
+        private final OrderSide side;
+        private final ReentrantLock lock;
+        private final long acquiredAt;
+        private boolean released;
+
+        private MarketLockScope(String marketSymbol, OrderSide side, ReentrantLock lock, long acquiredAt) {
+            this.marketSymbol = marketSymbol;
+            this.side = side;
+            this.lock = lock;
+            this.acquiredAt = acquiredAt;
+        }
+
+        private void release() {
+            if (released) {
+                return;
+            }
+            released = true;
+            stageRecorder.record(marketSymbol, side, "market_lock_hold", System.nanoTime() - acquiredAt);
+            lock.unlock();
+        }
+    }
 }
