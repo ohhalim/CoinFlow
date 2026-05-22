@@ -58,6 +58,7 @@ public class OrderService {
     private final DomainEventRecorder eventRecorder;
     private final MarketOrderLockManager marketOrderLockManager;
     private final OrderCreateValidator orderCreateValidator;
+    private final OrderAssetLockService orderAssetLockService;
     private final OrderCreateStageRecorder stageRecorder;
     private final TransactionTemplate transactionTemplate;
 
@@ -73,6 +74,7 @@ public class OrderService {
             DomainEventRecorder eventRecorder,
             MarketOrderLockManager marketOrderLockManager,
             OrderCreateValidator orderCreateValidator,
+            OrderAssetLockService orderAssetLockService,
             OrderCreateStageRecorder stageRecorder,
             PlatformTransactionManager transactionManager
     ) {
@@ -87,6 +89,7 @@ public class OrderService {
         this.eventRecorder = eventRecorder;
         this.marketOrderLockManager = marketOrderLockManager;
         this.orderCreateValidator = orderCreateValidator;
+        this.orderAssetLockService = orderAssetLockService;
         this.stageRecorder = stageRecorder;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
@@ -140,15 +143,7 @@ public class OrderService {
                 );
                 Long sequence = seq.nextSequence();
 
-                // wallet lock
-                Wallet wallet = stageRecorder.record(
-                        market.getSymbol(), side, "taker_wallet_lock",
-                        () -> walletRepository.findByUserIdAndAssetWithLock(currentUserId, command.lockedAsset())
-                                .orElseThrow(() -> new ApiException(ErrorCode.INSUFFICIENT_BALANCE))
-                );
-                if (wallet.getAvailableBalance().compareTo(command.lockedAmount()) < 0)
-                    throw new ApiException(ErrorCode.INSUFFICIENT_BALANCE);
-                wallet.lock(command.lockedAmount());
+                Wallet wallet = orderAssetLockService.lockTakerWallet(currentUserId, command);
 
                 // order 저장
                 Order order = Order.create(
@@ -162,13 +157,7 @@ public class OrderService {
                         () -> orderRepository.save(order));
                 eventRecorder.recordOrderAccepted(order);
 
-                // ORDER_LOCK ledger
-                stageRecorder.record(market.getSymbol(), side, "order_lock_ledger_save", () ->
-                        walletLedgerRepository.save(WalletLedger.create(
-                        wallet, LedgerType.ORDER_LOCK,
-                        command.lockedAmount().negate(), command.lockedAmount(),
-                        order.getId(), null
-                )));
+                orderAssetLockService.recordOrderLockLedger(wallet, order, command);
 
                 // 매칭 계획 수립 (큐 미변경), 정산
                 List<MatchResult> plan = stageRecorder.record(
