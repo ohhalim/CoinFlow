@@ -7,8 +7,6 @@ import com.coinflow.market.repository.MarketRepository;
 import com.coinflow.order.domain.Order;
 import com.coinflow.order.domain.OrderSequence;
 import com.coinflow.order.domain.OrderSide;
-import com.coinflow.order.domain.OrderType;
-import com.coinflow.order.domain.TimeInForce;
 import com.coinflow.order.dto.CancelOrderResponse;
 import com.coinflow.order.dto.CreateOrderRequest;
 import com.coinflow.order.dto.CreateOrderResponse;
@@ -59,6 +57,7 @@ public class OrderService {
     private final MatchingEngine matchingEngine;
     private final OrderBookRecoveryService orderBookRecoveryService;
     private final DomainEventRecorder eventRecorder;
+    private final OrderCreateValidator orderCreateValidator;
     private final OrderCreateStageRecorder stageRecorder;
     private final TransactionTemplate transactionTemplate;
 
@@ -74,6 +73,7 @@ public class OrderService {
             MatchingEngine matchingEngine,
             OrderBookRecoveryService orderBookRecoveryService,
             DomainEventRecorder eventRecorder,
+            OrderCreateValidator orderCreateValidator,
             OrderCreateStageRecorder stageRecorder,
             PlatformTransactionManager transactionManager
     ) {
@@ -86,6 +86,7 @@ public class OrderService {
         this.matchingEngine = matchingEngine;
         this.orderBookRecoveryService = orderBookRecoveryService;
         this.eventRecorder = eventRecorder;
+        this.orderCreateValidator = orderCreateValidator;
         this.stageRecorder = stageRecorder;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
@@ -93,38 +94,10 @@ public class OrderService {
     public CreateOrderResponse createOrder(Long currentUserId, CreateOrderRequest request) {
         long createStartedAt = System.nanoTime();
 
-        // 1. market 조회 및 검증
         Market market = marketRepository.findBySymbol(request.market())
                 .orElseThrow(() -> new ApiException(ErrorCode.MARKET_NOT_FOUND));
-        if (!market.isActive()) throw new ApiException(ErrorCode.MARKET_NOT_ACTIVE);
-        if (market.isCancelOnly()) throw new ApiException(ErrorCode.MARKET_CANCEL_ONLY);
-
-        // 2. 파싱 및 정책 검증
-        OrderSide side = parseSide(request.side());
-        OrderType type = parseType(request.type());
-        TimeInForce tif = parseTif(request.timeInForce());
-        BigDecimal price    = parseBigDecimal(request.price(),    ErrorCode.INVALID_PRICE);
-        BigDecimal quantity = parseBigDecimal(request.quantity(), ErrorCode.INVALID_QUANTITY);
-        if (price.compareTo(BigDecimal.ZERO) <= 0)    throw new ApiException(ErrorCode.INVALID_PRICE);
-        if (quantity.compareTo(BigDecimal.ZERO) <= 0) throw new ApiException(ErrorCode.INVALID_QUANTITY);
-        if (price.remainder(market.getTickSize()).compareTo(BigDecimal.ZERO) != 0)
-            throw new ApiException(ErrorCode.INVALID_TICK_SIZE);
-        if (quantity.remainder(market.getStepSize()).compareTo(BigDecimal.ZERO) != 0)
-            throw new ApiException(ErrorCode.INVALID_STEP_SIZE);
-        if (quantity.compareTo(market.getMinOrderQuantity()) < 0)
-            throw new ApiException(ErrorCode.MIN_ORDER_QUANTITY_NOT_MET);
-        if (price.multiply(quantity).compareTo(market.getMinOrderAmount()) < 0)
-            throw new ApiException(ErrorCode.MIN_ORDER_AMOUNT_NOT_MET);
-
-        String lockedAsset;
-        BigDecimal lockedAmount;
-        if (side == OrderSide.BUY) {
-            lockedAsset = market.getQuoteAsset();
-            lockedAmount = price.multiply(quantity).setScale(market.getAmountScale(), RoundingMode.CEILING);
-        } else {
-            lockedAsset = market.getBaseAsset();
-            lockedAmount = quantity;
-        }
+        CreateOrderCommand command = orderCreateValidator.validate(market, request);
+        OrderSide side = command.side();
 
         // 3. 시장별 lock 획득
         ReentrantLock marketLock = marketLocks.computeIfAbsent(market.getId(), k -> new ReentrantLock());
@@ -153,7 +126,7 @@ public class OrderService {
                 // self-trade 사전 검증 (MAT-006)
                 boolean hasSelfTrade = stageRecorder.record(
                         market.getSymbol(), side, "self_trade_check",
-                        () -> matchingEngine.hasSelfTrade(market.getSymbol(), side, price, currentUserId)
+                        () -> matchingEngine.hasSelfTrade(market.getSymbol(), side, command.price(), currentUserId)
                 );
                 if (hasSelfTrade) {
                     throw new ApiException(ErrorCode.SELF_TRADE_NOT_ALLOWED);
@@ -170,19 +143,19 @@ public class OrderService {
                 // wallet lock
                 Wallet wallet = stageRecorder.record(
                         market.getSymbol(), side, "taker_wallet_lock",
-                        () -> walletRepository.findByUserIdAndAssetWithLock(currentUserId, lockedAsset)
+                        () -> walletRepository.findByUserIdAndAssetWithLock(currentUserId, command.lockedAsset())
                                 .orElseThrow(() -> new ApiException(ErrorCode.INSUFFICIENT_BALANCE))
                 );
-                if (wallet.getAvailableBalance().compareTo(lockedAmount) < 0)
+                if (wallet.getAvailableBalance().compareTo(command.lockedAmount()) < 0)
                     throw new ApiException(ErrorCode.INSUFFICIENT_BALANCE);
-                wallet.lock(lockedAmount);
+                wallet.lock(command.lockedAmount());
 
                 // order 저장
                 Order order = Order.create(
                         currentUserId, market.getId(), market.getSymbol(),
-                        side, type, tif,
-                        price, quantity,
-                        lockedAsset, lockedAmount,
+                        side, command.type(), command.timeInForce(),
+                        command.price(), command.quantity(),
+                        command.lockedAsset(), command.lockedAmount(),
                         sequence, request.clientOrderId()
                 );
                 stageRecorder.record(market.getSymbol(), side, "order_save",
@@ -193,7 +166,7 @@ public class OrderService {
                 stageRecorder.record(market.getSymbol(), side, "order_lock_ledger_save", () ->
                         walletLedgerRepository.save(WalletLedger.create(
                         wallet, LedgerType.ORDER_LOCK,
-                        lockedAmount.negate(), lockedAmount,
+                        command.lockedAmount().negate(), command.lockedAmount(),
                         order.getId(), null
                 )));
 
@@ -457,23 +430,4 @@ public class OrderService {
         }
     }
 
-    private OrderSide parseSide(String value) {
-        try { return OrderSide.valueOf(value); }
-        catch (IllegalArgumentException e) { throw new ApiException(ErrorCode.INVALID_ORDER_SIDE); }
-    }
-
-    private OrderType parseType(String value) {
-        try { return OrderType.valueOf(value); }
-        catch (IllegalArgumentException e) { throw new ApiException(ErrorCode.INVALID_ORDER_TYPE); }
-    }
-
-    private TimeInForce parseTif(String value) {
-        try { return TimeInForce.valueOf(value); }
-        catch (IllegalArgumentException e) { throw new ApiException(ErrorCode.INVALID_REQUEST); }
-    }
-
-    private BigDecimal parseBigDecimal(String value, ErrorCode errorCode) {
-        try { return new BigDecimal(value); }
-        catch (NumberFormatException e) { throw new ApiException(errorCode); }
-    }
 }
