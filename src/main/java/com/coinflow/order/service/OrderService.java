@@ -19,7 +19,6 @@ import com.coinflow.order.matching.OrderBookRecoveryService;
 import com.coinflow.order.repository.OrderRepository;
 import com.coinflow.order.repository.OrderSequenceRepository;
 import com.coinflow.trade.domain.Trade;
-import com.coinflow.trade.repository.TradeRepository;
 import com.coinflow.wallet.domain.LedgerType;
 import com.coinflow.wallet.domain.Wallet;
 import com.coinflow.wallet.domain.WalletLedger;
@@ -35,12 +34,8 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
-import java.util.stream.Stream;
 import java.util.concurrent.locks.ReentrantLock;
 
 @Slf4j
@@ -51,7 +46,6 @@ public class OrderService {
     private final OrderRepository orderRepository;
     private final OrderSequenceRepository orderSequenceRepository;
     private final WalletRepository walletRepository;
-    private final TradeRepository tradeRepository;
     private final WalletLedgerRepository walletLedgerRepository;
     private final MatchingEngine matchingEngine;
     private final OrderBookRecoveryService orderBookRecoveryService;
@@ -59,6 +53,7 @@ public class OrderService {
     private final MarketOrderLockManager marketOrderLockManager;
     private final OrderCreateValidator orderCreateValidator;
     private final OrderAssetLockService orderAssetLockService;
+    private final OrderSettlementService orderSettlementService;
     private final OrderCreateStageRecorder stageRecorder;
     private final TransactionTemplate transactionTemplate;
 
@@ -67,7 +62,6 @@ public class OrderService {
             OrderRepository orderRepository,
             OrderSequenceRepository orderSequenceRepository,
             WalletRepository walletRepository,
-            TradeRepository tradeRepository,
             WalletLedgerRepository walletLedgerRepository,
             MatchingEngine matchingEngine,
             OrderBookRecoveryService orderBookRecoveryService,
@@ -75,6 +69,7 @@ public class OrderService {
             MarketOrderLockManager marketOrderLockManager,
             OrderCreateValidator orderCreateValidator,
             OrderAssetLockService orderAssetLockService,
+            OrderSettlementService orderSettlementService,
             OrderCreateStageRecorder stageRecorder,
             PlatformTransactionManager transactionManager
     ) {
@@ -82,7 +77,6 @@ public class OrderService {
         this.orderRepository = orderRepository;
         this.orderSequenceRepository = orderSequenceRepository;
         this.walletRepository = walletRepository;
-        this.tradeRepository = tradeRepository;
         this.walletLedgerRepository = walletLedgerRepository;
         this.matchingEngine = matchingEngine;
         this.orderBookRecoveryService = orderBookRecoveryService;
@@ -90,6 +84,7 @@ public class OrderService {
         this.marketOrderLockManager = marketOrderLockManager;
         this.orderCreateValidator = orderCreateValidator;
         this.orderAssetLockService = orderAssetLockService;
+        this.orderSettlementService = orderSettlementService;
         this.stageRecorder = stageRecorder;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
@@ -167,7 +162,7 @@ public class OrderService {
                 List<Order> autoCanceledMakers = new ArrayList<>();
                 List<Trade> trades = stageRecorder.record(
                         market.getSymbol(), side, "settlement",
-                        () -> settle(market, order, plan, autoCanceledMakers)
+                        () -> orderSettlementService.settle(market, order, plan, autoCanceledMakers)
                 );
 
                 // 커밋 성공 후 오더북 반영 — DB 롤백 시 큐는 그대로
@@ -272,151 +267,6 @@ public class OrderService {
                 ? orderRepository.findAllByUserIdAndMarketSymbolOrderByCreatedAtDesc(currentUserId, market, pageable)
                 : orderRepository.findAllByUserIdOrderByCreatedAtDesc(currentUserId, pageable);
         return orders.stream().map(OrderSummaryResponse::from).toList();
-    }
-
-    private List<Trade> settle(Market market, Order taker, List<MatchResult> matchResults, List<Order> autoCanceledMakers) {
-        if (matchResults.isEmpty()) return List.of();
-
-        List<Trade> trades = new ArrayList<>();
-
-        for (MatchResult result : matchResults) {
-            Order maker = stageRecorder.record(
-                    market.getSymbol(), taker.getSide(), "maker_order_lock",
-                    () -> orderRepository.findByIdWithLock(result.makerOrderId()).orElseThrow()
-            );
-            if (!maker.isCancelable()) {
-                throw new ApiException(ErrorCode.ORDER_NOT_FOUND);
-            }
-
-            boolean takerIsBuy = taker.getSide() == OrderSide.BUY;
-            Order buyOrder = takerIsBuy ? taker : maker;
-
-            // Capture buy order's locked amount BEFORE fill so we can compute what was released
-            BigDecimal oldBuyLocked = buyOrder.getLockedAmount();
-
-            maker.fill(result.quantity(), result.quoteAmount(), market.getAmountScale());
-            taker.fill(result.quantity(), result.quoteAmount(), market.getAmountScale());
-
-            // buyerReleased = portion of locked consumed this fill (quoteAmount paid + any rounding refund)
-            BigDecimal buyerReleased = oldBuyLocked.subtract(buyOrder.getLockedAmount());
-            BigDecimal buyerRefund   = buyerReleased.subtract(result.quoteAmount());
-
-            WalletKey buyerBaseKey = new WalletKey(result.buyUserId(), market.getBaseAsset());
-            WalletKey sellerQuoteKey = new WalletKey(result.sellUserId(), market.getQuoteAsset());
-            WalletKey sellerBaseKey = new WalletKey(result.sellUserId(), market.getBaseAsset());
-            WalletKey buyerQuoteKey = new WalletKey(result.buyUserId(), market.getQuoteAsset());
-            Map<WalletKey, Wallet> wallets = lockWalletsInOrder(
-                    market.getSymbol(),
-                    taker.getSide(),
-                    buyerBaseKey,
-                    sellerQuoteKey,
-                    sellerBaseKey,
-                    buyerQuoteKey
-            );
-
-            Wallet buyerBaseWallet   = wallets.get(buyerBaseKey);
-            Wallet sellerQuoteWallet = wallets.get(sellerQuoteKey);
-            Wallet sellerBaseWallet  = wallets.get(sellerBaseKey);
-            Wallet buyerQuoteWallet  = wallets.get(buyerQuoteKey);
-
-            buyerQuoteWallet.consumeLocked(buyerReleased);
-            if (buyerRefund.compareTo(BigDecimal.ZERO) > 0) {
-                buyerQuoteWallet.deposit(buyerRefund);
-            }
-            buyerBaseWallet.deposit(result.quantity());
-            sellerBaseWallet.consumeLocked(result.quantity());
-            sellerQuoteWallet.deposit(result.quoteAmount());
-
-            Trade trade = Trade.create(
-                    market.getId(), market.getSymbol(),
-                    result.buyOrderId(), result.sellOrderId(),
-                    result.makerOrderId(), result.takerOrderId(),
-                    result.buyUserId(), result.sellUserId(),
-                    result.price(), result.quantity(), result.quoteAmount()
-            );
-            tradeRepository.save(trade);
-
-            Long buyOrderId  = result.buyOrderId();
-            Long sellOrderId = result.sellOrderId();
-            Long tradeId     = trade.getId();
-
-            eventRecorder.recordOrderFillEvent(maker, tradeId);
-            eventRecorder.recordOrderFillEvent(taker, tradeId);
-            eventRecorder.recordTradeCreated(trade);
-
-            walletLedgerRepository.save(WalletLedger.create(
-                    buyerQuoteWallet, LedgerType.TRADE_BUY_QUOTE_SETTLE,
-                    buyerRefund, buyerReleased.negate(),
-                    buyOrderId, tradeId
-            ));
-            walletLedgerRepository.save(WalletLedger.create(
-                    buyerBaseWallet, LedgerType.TRADE_BUY_BASE_CREDIT,
-                    result.quantity(), BigDecimal.ZERO,
-                    buyOrderId, tradeId
-            ));
-            walletLedgerRepository.save(WalletLedger.create(
-                    sellerBaseWallet, LedgerType.TRADE_SELL_BASE_SETTLE,
-                    BigDecimal.ZERO, result.quantity().negate(),
-                    sellOrderId, tradeId
-            ));
-            walletLedgerRepository.save(WalletLedger.create(
-                    sellerQuoteWallet, LedgerType.TRADE_SELL_QUOTE_CREDIT,
-                    result.quoteAmount(), BigDecimal.ZERO,
-                    sellOrderId, tradeId
-            ));
-
-            // Dust maker 자동 취소 (PRD 9절): 체결 후 남은 수량의 quote value가 0이면 잔여 lock 해제 후 CANCELED
-            if (maker.getRemainingQuantity().signum() > 0) {
-                BigDecimal dustCheck = maker.getPrice()
-                        .multiply(maker.getRemainingQuantity())
-                        .setScale(market.getAmountScale(), RoundingMode.DOWN);
-                if (dustCheck.signum() == 0) {
-                    Wallet makerLockedWallet = takerIsBuy ? sellerBaseWallet : buyerQuoteWallet;
-                    BigDecimal dustRelease = maker.releasableAmount();
-                    makerLockedWallet.unlock(dustRelease);
-                    maker.cancel();
-                    autoCanceledMakers.add(maker);
-                    walletLedgerRepository.save(WalletLedger.create(
-                            makerLockedWallet, LedgerType.ORDER_CANCEL_RELEASE,
-                            dustRelease, dustRelease.negate(),
-                            maker.getId(), tradeId
-                    ));
-                    eventRecorder.recordOrderCanceled(maker, maker.getLockedAsset(), dustRelease.toPlainString());
-                }
-            }
-
-            eventRecorder.recordSettlementCompleted(trade);
-            trades.add(trade);
-        }
-
-        return trades;
-    }
-
-    private Map<WalletKey, Wallet> lockWalletsInOrder(String marketSymbol, OrderSide side, WalletKey... keys) {
-        List<WalletKey> sortedKeys = Stream.of(keys)
-                .distinct()
-                .sorted()
-                .toList();
-
-        Map<WalletKey, Wallet> wallets = new HashMap<>();
-        for (WalletKey key : sortedKeys) {
-            Wallet wallet = stageRecorder.record(
-                    marketSymbol, side, "settlement_wallet_lock",
-                    () -> walletRepository.findByUserIdAndAssetWithLock(key.userId(), key.asset())
-                            .orElseThrow(() -> new ApiException(ErrorCode.WALLET_NOT_FOUND))
-            );
-            wallets.put(key, wallet);
-        }
-        return wallets;
-    }
-
-    private record WalletKey(Long userId, String asset) implements Comparable<WalletKey> {
-        @Override
-        public int compareTo(WalletKey other) {
-            int userCompare = this.userId.compareTo(other.userId);
-            if (userCompare != 0) return userCompare;
-            return this.asset.compareTo(other.asset);
-        }
     }
 
 }
