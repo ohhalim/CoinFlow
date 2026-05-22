@@ -27,7 +27,6 @@ import com.coinflow.wallet.domain.Wallet;
 import com.coinflow.wallet.domain.WalletLedger;
 import com.coinflow.wallet.repository.WalletLedgerRepository;
 import com.coinflow.wallet.repository.WalletRepository;
-import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 import com.coinflow.common.pagination.OffsetBasedPageRequest;
 import org.springframework.stereotype.Service;
@@ -45,15 +44,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.function.Supplier;
 
 @Slf4j
 @Service
 public class OrderService {
-
-    private static final String ORDER_CREATE_STAGE_TIMER = "order.create.stage.duration";
 
     private final MarketRepository marketRepository;
     private final OrderRepository orderRepository;
@@ -64,8 +59,8 @@ public class OrderService {
     private final MatchingEngine matchingEngine;
     private final OrderBookRecoveryService orderBookRecoveryService;
     private final DomainEventRecorder eventRecorder;
+    private final OrderCreateStageRecorder stageRecorder;
     private final TransactionTemplate transactionTemplate;
-    private final MeterRegistry meterRegistry;
 
     private final Map<Long, ReentrantLock> marketLocks = new ConcurrentHashMap<>();
 
@@ -79,8 +74,8 @@ public class OrderService {
             MatchingEngine matchingEngine,
             OrderBookRecoveryService orderBookRecoveryService,
             DomainEventRecorder eventRecorder,
-            PlatformTransactionManager transactionManager,
-            MeterRegistry meterRegistry
+            OrderCreateStageRecorder stageRecorder,
+            PlatformTransactionManager transactionManager
     ) {
         this.marketRepository = marketRepository;
         this.orderRepository = orderRepository;
@@ -91,8 +86,8 @@ public class OrderService {
         this.matchingEngine = matchingEngine;
         this.orderBookRecoveryService = orderBookRecoveryService;
         this.eventRecorder = eventRecorder;
+        this.stageRecorder = stageRecorder;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
-        this.meterRegistry = meterRegistry;
     }
 
     public CreateOrderResponse createOrder(Long currentUserId, CreateOrderRequest request) {
@@ -136,17 +131,17 @@ public class OrderService {
         long marketLockWaitStartedAt = System.nanoTime();
         marketLock.lock();
         long marketLockAcquiredAt = System.nanoTime();
-        recordOrderCreateStage(market.getSymbol(), side, "market_lock_wait",
+        stageRecorder.record(market.getSymbol(), side, "market_lock_wait",
                 marketLockAcquiredAt - marketLockWaitStartedAt);
         try {
-            return recordOrderCreateStage(market.getSymbol(), side, "transaction_template", () ->
+            return stageRecorder.record(market.getSymbol(), side, "transaction_template", () ->
                     transactionTemplate.execute(status -> {
                 long transactionCallbackStartedAt = System.nanoTime();
                 try {
 
                 // clientOrderId 중복 검증
                 if (request.clientOrderId() != null) {
-                    boolean duplicatedClientOrderId = recordOrderCreateStage(
+                    boolean duplicatedClientOrderId = stageRecorder.record(
                             market.getSymbol(), side, "client_order_id_check",
                             () -> orderRepository.existsByUserIdAndClientOrderId(currentUserId, request.clientOrderId())
                     );
@@ -156,7 +151,7 @@ public class OrderService {
                 }
 
                 // self-trade 사전 검증 (MAT-006)
-                boolean hasSelfTrade = recordOrderCreateStage(
+                boolean hasSelfTrade = stageRecorder.record(
                         market.getSymbol(), side, "self_trade_check",
                         () -> matchingEngine.hasSelfTrade(market.getSymbol(), side, price, currentUserId)
                 );
@@ -165,7 +160,7 @@ public class OrderService {
                 }
 
                 // sequence 발급
-                OrderSequence seq = recordOrderCreateStage(
+                OrderSequence seq = stageRecorder.record(
                         market.getSymbol(), side, "sequence_lock",
                         () -> orderSequenceRepository.findByMarketIdWithLock(market.getId())
                                 .orElseThrow(() -> new ApiException(ErrorCode.MARKET_NOT_FOUND))
@@ -173,7 +168,7 @@ public class OrderService {
                 Long sequence = seq.nextSequence();
 
                 // wallet lock
-                Wallet wallet = recordOrderCreateStage(
+                Wallet wallet = stageRecorder.record(
                         market.getSymbol(), side, "taker_wallet_lock",
                         () -> walletRepository.findByUserIdAndAssetWithLock(currentUserId, lockedAsset)
                                 .orElseThrow(() -> new ApiException(ErrorCode.INSUFFICIENT_BALANCE))
@@ -190,12 +185,12 @@ public class OrderService {
                         lockedAsset, lockedAmount,
                         sequence, request.clientOrderId()
                 );
-                recordOrderCreateStage(market.getSymbol(), side, "order_save",
+                stageRecorder.record(market.getSymbol(), side, "order_save",
                         () -> orderRepository.save(order));
                 eventRecorder.recordOrderAccepted(order);
 
                 // ORDER_LOCK ledger
-                recordOrderCreateStage(market.getSymbol(), side, "order_lock_ledger_save", () ->
+                stageRecorder.record(market.getSymbol(), side, "order_lock_ledger_save", () ->
                         walletLedgerRepository.save(WalletLedger.create(
                         wallet, LedgerType.ORDER_LOCK,
                         lockedAmount.negate(), lockedAmount,
@@ -203,12 +198,12 @@ public class OrderService {
                 )));
 
                 // 매칭 계획 수립 (큐 미변경), 정산
-                List<MatchResult> plan = recordOrderCreateStage(
+                List<MatchResult> plan = stageRecorder.record(
                         market.getSymbol(), side, "matching_plan",
                         () -> matchingEngine.planMatch(market, order)
                 );
                 List<Order> autoCanceledMakers = new ArrayList<>();
-                List<Trade> trades = recordOrderCreateStage(
+                List<Trade> trades = stageRecorder.record(
                         market.getSymbol(), side, "settlement",
                         () -> settle(market, order, plan, autoCanceledMakers)
                 );
@@ -226,7 +221,7 @@ public class OrderService {
                             log.error("오더북 applyMatchPlan 실패: orderId={}, DB 체결 내역 기반 재빌드 시도", order.getId(), e);
                             orderBookRecoveryService.rebuildAfterApplyFailure(market.getId());
                         } finally {
-                            recordOrderCreateStage(market.getSymbol(), side, "orderbook_after_commit",
+                            stageRecorder.record(market.getSymbol(), side, "orderbook_after_commit",
                                     System.nanoTime() - orderBookApplyStartedAt);
                         }
                     }
@@ -234,14 +229,14 @@ public class OrderService {
 
                 return CreateOrderResponse.of(order, trades);
                 } finally {
-                    recordOrderCreateStage(market.getSymbol(), side, "transaction_callback",
+                    stageRecorder.record(market.getSymbol(), side, "transaction_callback",
                             System.nanoTime() - transactionCallbackStartedAt);
                 }
             }));
         } finally {
-            recordOrderCreateStage(market.getSymbol(), side, "market_lock_hold",
+            stageRecorder.record(market.getSymbol(), side, "market_lock_hold",
                     System.nanoTime() - marketLockAcquiredAt);
-            recordOrderCreateStage(market.getSymbol(), side, "total",
+            stageRecorder.record(market.getSymbol(), side, "total",
                     System.nanoTime() - createStartedAt);
             marketLock.unlock();
         }
@@ -323,7 +318,7 @@ public class OrderService {
         List<Trade> trades = new ArrayList<>();
 
         for (MatchResult result : matchResults) {
-            Order maker = recordOrderCreateStage(
+            Order maker = stageRecorder.record(
                     market.getSymbol(), taker.getSide(), "maker_order_lock",
                     () -> orderRepository.findByIdWithLock(result.makerOrderId()).orElseThrow()
             );
@@ -443,7 +438,7 @@ public class OrderService {
 
         Map<WalletKey, Wallet> wallets = new HashMap<>();
         for (WalletKey key : sortedKeys) {
-            Wallet wallet = recordOrderCreateStage(
+            Wallet wallet = stageRecorder.record(
                     marketSymbol, side, "settlement_wallet_lock",
                     () -> walletRepository.findByUserIdAndAssetWithLock(key.userId(), key.asset())
                             .orElseThrow(() -> new ApiException(ErrorCode.WALLET_NOT_FOUND))
@@ -480,23 +475,5 @@ public class OrderService {
     private BigDecimal parseBigDecimal(String value, ErrorCode errorCode) {
         try { return new BigDecimal(value); }
         catch (NumberFormatException e) { throw new ApiException(errorCode); }
-    }
-
-    private <T> T recordOrderCreateStage(String marketSymbol, OrderSide side, String stage, Supplier<T> supplier) {
-        long startedAt = System.nanoTime();
-        try {
-            return supplier.get();
-        } finally {
-            recordOrderCreateStage(marketSymbol, side, stage, System.nanoTime() - startedAt);
-        }
-    }
-
-    private void recordOrderCreateStage(String marketSymbol, OrderSide side, String stage, long elapsedNanos) {
-        meterRegistry.timer(
-                ORDER_CREATE_STAGE_TIMER,
-                "market", marketSymbol,
-                "side", side.name(),
-                "stage", stage
-        ).record(elapsedNanos, TimeUnit.NANOSECONDS);
     }
 }
