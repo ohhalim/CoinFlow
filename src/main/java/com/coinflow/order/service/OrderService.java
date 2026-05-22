@@ -41,7 +41,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 
 @Slf4j
@@ -57,11 +56,10 @@ public class OrderService {
     private final MatchingEngine matchingEngine;
     private final OrderBookRecoveryService orderBookRecoveryService;
     private final DomainEventRecorder eventRecorder;
+    private final MarketOrderLockManager marketOrderLockManager;
     private final OrderCreateValidator orderCreateValidator;
     private final OrderCreateStageRecorder stageRecorder;
     private final TransactionTemplate transactionTemplate;
-
-    private final Map<Long, ReentrantLock> marketLocks = new ConcurrentHashMap<>();
 
     public OrderService(
             MarketRepository marketRepository,
@@ -73,6 +71,7 @@ public class OrderService {
             MatchingEngine matchingEngine,
             OrderBookRecoveryService orderBookRecoveryService,
             DomainEventRecorder eventRecorder,
+            MarketOrderLockManager marketOrderLockManager,
             OrderCreateValidator orderCreateValidator,
             OrderCreateStageRecorder stageRecorder,
             PlatformTransactionManager transactionManager
@@ -86,6 +85,7 @@ public class OrderService {
         this.matchingEngine = matchingEngine;
         this.orderBookRecoveryService = orderBookRecoveryService;
         this.eventRecorder = eventRecorder;
+        this.marketOrderLockManager = marketOrderLockManager;
         this.orderCreateValidator = orderCreateValidator;
         this.stageRecorder = stageRecorder;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
@@ -100,7 +100,7 @@ public class OrderService {
         OrderSide side = command.side();
 
         // 3. 시장별 lock 획득
-        ReentrantLock marketLock = marketLocks.computeIfAbsent(market.getId(), k -> new ReentrantLock());
+        ReentrantLock marketLock = marketOrderLockManager.getLock(market.getId());
         long marketLockWaitStartedAt = System.nanoTime();
         marketLock.lock();
         long marketLockAcquiredAt = System.nanoTime();
@@ -222,7 +222,7 @@ public class OrderService {
                 .orElseThrow(() -> new ApiException(ErrorCode.ORDER_NOT_FOUND));
         if (!order.isCancelable()) throw new ApiException(ErrorCode.ORDER_NOT_CANCELABLE);
 
-        ReentrantLock marketLock = marketLocks.computeIfAbsent(order.getMarketId(), k -> new ReentrantLock());
+        ReentrantLock marketLock = marketOrderLockManager.getLock(order.getMarketId());
         marketLock.lock();
         try {
             return transactionTemplate.execute(status -> {
@@ -266,7 +266,7 @@ public class OrderService {
     }
 
     public ReentrantLock getMarketLock(Long marketId) {
-        return marketLocks.computeIfAbsent(marketId, k -> new ReentrantLock());
+        return marketOrderLockManager.getLock(marketId);
     }
 
     @Transactional(readOnly = true)
