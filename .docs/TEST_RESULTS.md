@@ -676,12 +676,115 @@ Next action:
   - orderbook snapshot을 full snapshot이 아니라 delta 또는 bounded depth cache로 전환
   - 성능 테스트 전용 fresh DB/Kafka 환경을 구성해 누적 데이터 영향을 제거
 
-## 15. 발견 이슈
+## 15. 오더북 브로드캐스트 락 경합 완화
+
+Date: 2026-05-21
+
+Context:
+
+| 항목 | 값 |
+|---|---|
+| Issue | `#51` 오더북 브로드캐스트 락 경합 완화 |
+| Branch | `perf/51/orderbook-broadcast-lock-contention` |
+| DB | Local Docker MySQL 8 |
+| Kafka | Local Docker Kafka |
+| App run option | `DEBUG=false` |
+
+Changes:
+
+- WebSocket 오더북 브로드캐스트에서 `OrderService` market lock 의존을 제거했다.
+- `MemoryOrderBook`에 synchronized snapshot API를 추가해 buy/sell side를 짧은 오더북 내부 lock 범위에서 함께 복사한다.
+- REST 오더북 조회도 동일한 `MatchingEngine.snapshot()` 경로를 사용하도록 변경했다.
+- `websocket.orderbook.snapshot.duration` metric을 추가해 snapshot 생성 시간을 별도로 측정한다.
+
+Verification:
+
+```bash
+./gradlew test --tests 'com.coinflow.websocket.*'
+./gradlew test --tests com.coinflow.integration.WebSocketOrderBookBroadcastIntegrationTest --tests com.coinflow.query.QueryApiTest
+./gradlew test
+k6 run -e RUN_ID=lockfix2-50-100-a -e DURATION=30s -e WS_WARMUP=5s -e WS_SUBSCRIBERS=50 -e ORDER_RATE=100 -e ORDER_VUS=40 -e ORDER_MAX_VUS=200 -e BUYER_COUNT=50 -e SELLER_COUNT=50 k6/websocket-kafka-load-test.js
+```
+
+Result:
+
+| 항목 | 결과 |
+|---|---:|
+| WebSocket unit tests | Passed |
+| OrderBook broadcast / Query API targeted tests | Passed |
+| Full regression test | Passed |
+| k6 scenario status | FAIL: `order_create_duration p95 < 1000ms` 초과 |
+| HTTP failed | `0.00%` |
+| 5xx | `0` |
+
+Before / after comparison:
+
+| Scenario | Change point | Created orders | Created trades | Trade lag p95 | Trade lag p99 | Order create p95 | Order create p99 | Dropped iterations | OrderBook broadcast max | OrderBook snapshot max |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 50 subscribers / 100 order/s | Before `#51` | 2,882 | 1,441 | 1.23s | 1.44s | 1.64s | 1.72s | 118 | 1.63s | - |
+| 50 subscribers / 100 order/s | After lock contention fix | 2,917 | 1,458 | 290ms | 302ms | 1.22s | 1.29s | 84 | 0.0040s | 0.00047s |
+
+Capture correlation 기준:
+
+| 구분 | 값 |
+|---|---|
+| Before capture range | `2026-05-22 14:33:30 ~ 14:35:10 KST` |
+| After capture range | `2026-05-22 14:53:00 ~ 14:54:15 KST` |
+| Before k6 summary | `/private/tmp/k6-before-orderbook-lock-rerun.json` |
+| After k6 summary | `/private/tmp/k6-after-orderbook-lock-rerun.json` |
+| Before Prometheus scrape | `/private/tmp/coinflow-metrics-before-rerun.txt` |
+| After Prometheus scrape | `/private/tmp/coinflow-metrics-after-rerun.txt` |
+
+동일 조건 재측정:
+
+| Scenario | Change point | Created orders | Created trades | Trade lag p95 | Trade lag p99 | Order create p95 | Order create p99 | Dropped iterations | OrderBook broadcast count / sum / max | OrderBook snapshot max |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 50 subscribers / 100 order/s | Before `#51` | 2,712 | 1,356 | 2.012s | 2.219s | 2.434s | 2.466s | 289 | 54 / 60.617s / 2.4019s | - |
+| 50 subscribers / 100 order/s | After lock contention fix | 2,523 | 1,261 | 284ms | 309ms | 2.806s | 3.078s | 478 | 114 / 0.044s / 0.0044s | 0.00056s |
+
+동일 조건 재측정 해석:
+
+- `websocket.orderbook.broadcast.duration`은 sum `60.617s -> 0.044s`, max `2.4019s -> 0.0044s`로 감소했다.
+- `ws_trade_delivery_lag` p95는 `2.012s -> 284ms`로 감소했다.
+- Outbox unpublished event, Kafka consumer lag, Hikari pending connection은 before/after 모두 `0`으로 확인했다.
+- 주문 생성 p95는 `2.434s -> 2.806s`로 개선되지 않았다. 따라서 after 재측정 기준의 주문 생성 지연은 오더북 broadcast lock 경합만으로 설명하지 않는다.
+- 후속 분석 범위는 성능 테스트 전용 fresh DB/Kafka 환경 구성, market lock 보유 시간, DB pessimistic lock 대기, 트랜잭션 hold time 계측으로 분리한다.
+
+Post-run observations:
+
+| 항목 | 관측 |
+|---|---:|
+| Outbox unpublished events | `0` |
+| Kafka consumer lag | `0` for `coinflow-websocket` group |
+| Hikari connection | active `0`, pending `0` |
+| `websocket.trade.broadcast.duration` count / sum / max | `1458` / `0.292s` / `0.0028s` |
+| `websocket.orderbook.broadcast.duration` count / sum / max | `107` / `0.0298s` / `0.0040s` |
+| `websocket.orderbook.snapshot.duration` count / sum / max | `107` / `0.0055s` / `0.00047s` |
+| JVM GC pause max sample | `0.007s` |
+
+Finding:
+
+- 오더북 snapshot broadcast의 market lock 경합은 제거된 것으로 판단한다.
+- `websocket.orderbook.broadcast.duration` max가 `1.63s`에서 `0.0040s`로 감소했다.
+- `websocket.orderbook.snapshot.duration` max는 `0.00047s`로 측정되어 snapshot 생성 자체는 병목으로 보이지 않는다.
+- trade feed p95는 `1.23s`에서 `290ms`로 개선됐다.
+- 주문 생성 p95는 `1.64s`에서 `1.22s`로 개선됐으나, `1s` 기준은 아직 초과한다.
+- Outbox backlog, Kafka consumer lag, Hikari pending은 모두 0으로 관측됐다.
+- 다음 병목은 WebSocket/Kafka 전파가 아니라 주문 생성 경로의 per-market 직렬화, DB pessimistic lock, 트랜잭션 hold time으로 분리한다.
+
+Next action:
+
+- 주문 생성 경로의 market lock 보유 시간과 DB lock 대기 시간을 계측한다.
+- 매칭 계획 생성, DB 정산, 인메모리 오더북 반영 구간별 시간을 분리한다.
+- 같은 `50 subscribers / 100 order/s` 조건에서 order create p95 `1s` 미만 달성을 목표로 재측정한다.
+
+## 16. 발견 이슈
 
 | ID | Severity | Symptom | Suspected cause | Action |
 |---|---|---|---|---|
 | WS-001 | MAJOR | `ORDER_RATE=50`에서 trade feed p95가 `13s~14s`대로 상승 | Outbox 발행 주기/배치가 domain event 생성 속도를 따라가지 못함 | `#49`에서 Outbox cadence 조정 후 p95 `250ms`로 개선 |
-| WS-002 | MAJOR | `50 subscribers / 100 order/s`에서 order create p95 `1.64s`, trade lag p95 `1.23s` | OrderBook snapshot broadcast가 market lock을 잡고 주문 생성 경로와 경합 | 후속 이슈에서 orderbook broadcast lock 범위/생성 방식 개선 |
+| WS-002 | MAJOR | `50 subscribers / 100 order/s`에서 orderbook broadcast max `1.63s`, trade lag p95 `1.23s` | OrderBook snapshot broadcast가 market lock을 잡고 주문 생성 경로와 경합 | `#51`에서 market lock 의존 제거 후 orderbook broadcast max `0.0040s`, trade lag p95 `290ms`로 개선 |
+| ORD-001 | MAJOR | `50 subscribers / 100 order/s`에서 order create p95가 `1.22s`로 남음 | 주문 생성 경로의 per-market 직렬화, DB pessimistic lock, 트랜잭션 hold time | 후속 이슈에서 주문 생성 구간별 계측 및 lock hold time 축소 |
 
 Severity:
 
@@ -689,7 +792,7 @@ Severity:
 - `MAJOR`: 5xx, lock timeout, 반복 가능한 성능 병목
 - `MINOR`: 문서/로그/테스트 안정성 개선
 
-## 16. 후속 조치
+## 17. 후속 조치
 
 | Action | Owner | Status | Link |
 |---|---|---|---|
@@ -703,4 +806,5 @@ Severity:
 | Expand WebSocket/Kafka propagation load baseline |  | DONE |  |
 | Reduce WebSocket/Kafka propagation bottleneck |  | DONE |  |
 | Measure WebSocket/Kafka propagation load limit |  | DONE |  |
-| Reduce orderbook broadcast lock contention |  | TODO |  |
+| Reduce orderbook broadcast lock contention |  | DONE |  |
+| Measure and reduce order creation transaction lock contention |  | TODO |  |

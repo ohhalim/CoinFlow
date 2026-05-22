@@ -2,7 +2,7 @@ package com.coinflow.websocket;
 
 import com.coinflow.order.matching.MatchingEngine;
 import com.coinflow.order.matching.OrderBookEntry;
-import com.coinflow.order.service.OrderService;
+import com.coinflow.order.matching.OrderBookSnapshot;
 import com.coinflow.websocket.dto.OrderBookSnapshotMessage;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -15,7 +15,6 @@ import org.springframework.test.util.ReflectionTestUtils;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
-import java.util.concurrent.locks.ReentrantLock;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.eq;
@@ -25,7 +24,6 @@ class OrderBookBroadcasterTest {
 
     private SimpMessagingTemplate messagingTemplate;
     private MatchingEngine matchingEngine;
-    private OrderService orderService;
     private TaskScheduler taskScheduler;
     private OrderBookBroadcaster broadcaster;
 
@@ -33,13 +31,11 @@ class OrderBookBroadcasterTest {
     void setUp() {
         messagingTemplate = mock(SimpMessagingTemplate.class);
         matchingEngine = mock(MatchingEngine.class);
-        orderService = mock(OrderService.class);
         taskScheduler = mock(TaskScheduler.class);
         runScheduledTasksImmediately();
         broadcaster = new OrderBookBroadcaster(
                 messagingTemplate,
                 matchingEngine,
-                orderService,
                 new ObjectMapper(),
                 taskScheduler,
                 new SimpleMeterRegistry()
@@ -50,14 +46,15 @@ class OrderBookBroadcasterTest {
 
     @Test
     void 주문_이벤트를_시장별_오더북_topic으로_broadcast한다() {
-        when(orderService.getMarketLock(1L)).thenReturn(new ReentrantLock());
-        when(matchingEngine.getBuySide("BTC-KRW")).thenReturn(List.of(
-                entry(1L, "100000000", "0.0001", 1L),
-                entry(2L, "100000000", "0.0002", 2L),
-                entry(3L, "99000000", "0.0003", 3L)
-        ));
-        when(matchingEngine.getSellSide("BTC-KRW")).thenReturn(List.of(
-                entry(4L, "101000000", "0.0004", 4L)
+        when(matchingEngine.snapshot("BTC-KRW")).thenReturn(new OrderBookSnapshot(
+                List.of(
+                        entry(1L, "100000000", "0.0001", 1L),
+                        entry(2L, "100000000", "0.0002", 2L),
+                        entry(3L, "99000000", "0.0003", 3L)
+                ),
+                List.of(
+                        entry(4L, "101000000", "0.0004", 4L)
+                )
         ));
 
         broadcaster.onOrderEvent(orderEventMessage(30L, "ORDER_ACCEPTED"));
@@ -81,17 +78,16 @@ class OrderBookBroadcasterTest {
     void 주문_이벤트가_아니면_broadcast하지_않는다() {
         broadcaster.onOrderEvent(orderEventMessage(31L, "SETTLEMENT_COMPLETED"));
 
-        verifyNoInteractions(messagingTemplate, matchingEngine, orderService);
+        verifyNoInteractions(messagingTemplate, matchingEngine);
     }
 
     @Test
     void 같은_시장_오더북_이벤트는_지연_시간_동안_마지막_snapshot만_broadcast한다() {
         doReturn(null).when(taskScheduler).schedule(any(Runnable.class), any(Instant.class));
-        when(orderService.getMarketLock(1L)).thenReturn(new ReentrantLock());
-        when(matchingEngine.getBuySide("BTC-KRW")).thenReturn(List.of(
-                entry(1L, "100000000", "0.0001", 1L)
+        when(matchingEngine.snapshot("BTC-KRW")).thenReturn(new OrderBookSnapshot(
+                List.of(entry(1L, "100000000", "0.0001", 1L)),
+                List.of()
         ));
-        when(matchingEngine.getSellSide("BTC-KRW")).thenReturn(List.of());
 
         broadcaster.onOrderEvent(orderEventMessage(32L, "ORDER_ACCEPTED"));
         broadcaster.onOrderEvent(orderEventMessage(33L, "ORDER_CANCELED"));
@@ -108,10 +104,23 @@ class OrderBookBroadcasterTest {
     }
 
     @Test
+    void 오더북_snapshot은_matching_engine_snapshot으로_조회한다() {
+        when(matchingEngine.snapshot("BTC-KRW")).thenReturn(new OrderBookSnapshot(
+                List.of(entry(1L, "100000000", "0.0001", 1L)),
+                List.of()
+        ));
+
+        broadcaster.onOrderEvent(orderEventMessage(34L, "ORDER_ACCEPTED"));
+
+        verify(matchingEngine).snapshot("BTC-KRW");
+        verify(messagingTemplate).convertAndSend(eq("/topic/orderbook/BTC-KRW"), any(OrderBookSnapshotMessage.class));
+    }
+
+    @Test
     void 파싱_실패가_발생해도_예외를_전파하지_않는다() {
         broadcaster.onOrderEvent("{broken-json");
 
-        verifyNoInteractions(messagingTemplate, matchingEngine, orderService);
+        verifyNoInteractions(messagingTemplate, matchingEngine);
     }
 
     private static OrderBookEntry entry(Long orderId, String price, String quantity, Long sequence) {

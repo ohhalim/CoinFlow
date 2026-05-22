@@ -1,45 +1,67 @@
 # CoinFlow
 
-CoinFlow는 단일 인스턴스 환경에서 지정가 주문 생성, 가격-시간 우선 매칭, 체결, 지갑 정산, 원장 기록까지 검증하는 암호화폐 거래소 코어 백엔드 MVP입니다.
+개발 사이클에 맞춰 거래 정합성과 실시간 전파 성능을 검증한 암호화폐 거래소 코어 백엔드 프로젝트입니다.
 
-이 프로젝트는 실시간 시세나 분산 인프라보다 주문과 자산 정합성을 우선합니다. 주문이 체결될 때 `orders`, `trades`, `wallets`, `wallet_ledgers`, `domain_events`가 일관되게 기록되는 것을 목표로 합니다.
+## 프로젝트 개요
 
-## 구현 범위
+| 항목 | 내용 |
+|---|---|
+| 주제 | 지정가 주문, 가격-시간 우선 매칭, 체결, 지갑 정산, 원장 기록, 실시간 체결/오더북 전파를 구현한 거래소 코어 백엔드 |
+| 목표 | 주문과 자산 정합성을 유지하면서 Kafka/WebSocket 기반 외부 전파 경로의 병목을 측정하고 개선 |
+| 개발 프로세스 | Phase 1 거래 코어 MVP 구축 -> 정합성/동시성 테스트 보강 -> Phase 2 Outbox/Kafka/WebSocket 도입 -> k6/Grafana 기반 병목 분석과 개선 |
+| 핵심 관점 | 기능 구현보다 돈, 잔고, 주문, 체결 상태가 깨지지 않는 구조와 측정 가능한 개선 과정을 우선 |
 
-- 회원가입, 로그인, JWT access token 인증
-- 사용자별 지갑 자동 생성 및 데이터 분리
-- 지정가 `BUY` / `SELL` 주문 생성
-- 주문 취소
-- 가격 우선, 시간 우선 매칭
-- 부분 체결, 완전 체결
-- BUY 주문 quote asset 잠금, SELL 주문 base asset 잠금
-- 체결 시 buyer/seller 지갑 정산
-- append-only 지갑 원장 기록
-- 시장, 오더북, 최근 체결, 사용자 fill, 지갑, 원장 조회
-- 서버 시작 시 DB의 미체결 주문으로 인메모리 오더북 초기화
-- 주문/체결/정산 도메인 이벤트 로그 저장
-- Outbox Publisher 기반 Kafka 이벤트 발행
-- Kafka 발행 성공/실패 상태와 재시도 횟수 관리
-- Kafka Consumer 기반 WebSocket 실시간 체결 push (`/topic/trades/{market}`)
-- Kafka Consumer 기반 WebSocket 오더북 snapshot push (`/topic/orderbook/{market}`)
+CoinFlow는 단일 인스턴스 환경에서 주문 생성부터 체결, 지갑 정산, 원장 기록까지 검증합니다. 주문이 체결될 때 `orders`, `trades`, `wallets`, `wallet_ledgers`, `domain_events`가 같은 트랜잭션 경계 안에서 일관되게 기록되는 것을 목표로 합니다.
 
-## 제외 범위
+## 기술 스택
 
-- 입금/출금
-- 시장가 주문
-- IOC/FOK/GTT, post-only, iceberg 주문
-- 수수료
-- refresh token, OAuth/social login, role/permission
-- WebSocket 연결 인증/권한 분리
-- Redis, 서버 분리
-- replay, redrive, reconciliation
-- 관리자 페이지
+| 영역 | 기술 |
+|---|---|
+| Language | Java 21 |
+| Framework | Spring Boot 3.5, Spring Web MVC |
+| Security | Spring Security, OAuth2 Resource Server, JWT |
+| Persistence | Spring Data JPA, MySQL 8, Flyway |
+| Messaging | Spring Kafka, Kafka |
+| Realtime | Spring WebSocket, STOMP |
+| Test | JUnit 5, AssertJ, Testcontainers MySQL, Embedded Kafka, k6 |
+| Observability | Actuator, Micrometer, Prometheus, Grafana |
+| Infra | Docker Compose |
 
-일부 로컬 개발 편의를 위한 API와 인프라 기반은 존재하지만, 운영 기능 범위와 구분합니다. 예를 들어 dev/test 입금 보조 API는 `prod` 프로필에서 제외됩니다. Kafka는 현재 `domain_events` outbox 발행과 체결/오더북 WebSocket broadcast까지 연결되어 있습니다.
+## 서버 아키텍처
 
-Phase 1 완료 이후 리뷰 과정에서 zero-quote 체결 방지, dust maker 자동 취소, 오더북 재빌드 같은 정합성 보강이 추가되었습니다.
+```text
+Client
+  | REST API
+  v
+Spring MVC Controller
+  |
+  v
+OrderService / WalletService
+  |
+  v
+MatchingEngine + in-memory OrderBook
+  |
+  v
+MySQL
+  | orders / trades / wallets / wallet_ledgers / domain_events
+  v
+Outbox Publisher
+  |
+  v
+Kafka
+  |
+  v
+Kafka Consumer
+  |
+  v
+WebSocket STOMP topics
+  | /topic/trades/{market}
+  | /topic/orderbook/{market}
+  v
+Client subscribers
+```
 
-## 핵심 설계
+핵심 설계:
 
 | 주제 | 설계 |
 |---|---|
@@ -51,23 +73,164 @@ Phase 1 완료 이후 리뷰 과정에서 zero-quote 체결 방지, dust maker �
 | 지갑 모델 | `available_balance`와 `locked_balance`를 분리합니다. |
 | 원장 | 모든 지갑 변경을 `wallet_ledgers`에 append-only로 기록합니다. |
 | 이벤트 | `domain_events`를 outbox로 사용해 DB commit 이후 Kafka로 발행합니다. |
-| 실시간 체결 | Kafka `TRADE_CREATED` 이벤트를 소비해 `/topic/trades/{market}`로 broadcast합니다. |
-| 실시간 오더북 | Kafka 주문 이벤트를 소비해 현재 인메모리 오더북 snapshot을 `/topic/orderbook/{market}`로 broadcast합니다. |
 
-## 기술 스택
+## 핵심 기능
 
-- Java 21
-- Spring Boot 3.5
-- Spring Web MVC
-- Spring Security + OAuth2 Resource Server + JWT
-- Spring Data JPA
-- Spring Kafka
-- MySQL 8
-- Flyway
-- JUnit 5, AssertJ
-- Testcontainers MySQL
-- Actuator, Micrometer, Prometheus registry
-- Docker Compose
+### 1. 주문, 매칭, 정산 코어
+
+- 지정가 `BUY` / `SELL` 주문 생성
+- 가격 우선, 시간 우선 매칭
+- 부분 체결, 완전 체결
+- 주문 취소
+- BUY 주문 quote asset 잠금, SELL 주문 base asset 잠금
+- 체결 시 buyer/seller 지갑 정산
+- BUY taker 가격 차이 환불
+- append-only 지갑 원장 기록
+- 서버 시작 시 DB의 미체결 주문으로 인메모리 오더북 초기화
+
+### 2. 조회 API
+
+- 시장 조회
+- 오더북 조회
+- 최근 체결 조회
+- 사용자 fill 조회
+- 지갑 조회
+- 지갑 원장 조회
+
+### 3. 이벤트 기반 실시간 전파
+
+- 주문/체결/정산 도메인 이벤트를 `domain_events` outbox에 저장
+- Outbox Publisher가 DB commit 이후 Kafka topic으로 발행
+- Kafka 발행 성공/실패 상태와 재시도 횟수 관리
+- Kafka Consumer 기반 WebSocket 실시간 체결 push
+- Kafka Consumer 기반 WebSocket 오더북 snapshot push
+
+| 항목 | 값 |
+|---|---|
+| WebSocket endpoint | `ws://localhost:8080/ws` |
+| 체결 feed topic | `/topic/trades/{market}` |
+| 체결 예시 topic | `/topic/trades/BTC-KRW` |
+| 오더북 feed topic | `/topic/orderbook/{market}` |
+| 오더북 예시 topic | `/topic/orderbook/BTC-KRW` |
+
+## 개선 사항
+
+### 1. 거래 정합성 보강
+
+문제 상황:
+
+- MVP 이후 주문/체결 경계 케이스에서 잔고와 오더북 파생 상태가 어긋날 수 있는 위험을 점검했습니다.
+- zero-quote 체결, dust maker 잔량, 오더북 반영 실패 후 복구 같은 케이스는 단순 API 테스트만으로는 드러나기 어렵습니다.
+- 동일 사용자 동시 주문, 하나의 maker 주문에 대한 동시 taker 체결, 주문 취소와 체결 경합은 잔고 음수나 체결 수량 초과로 이어질 수 있습니다.
+
+해결 방법:
+
+- 지갑 잔고 음수 방지 검증을 공통 정합성 유틸로 분리했습니다.
+- 주문/체결/취소 후 `wallets`, `orders`, `trades`, `wallet_ledgers` 상태를 함께 검증했습니다.
+- 오더북은 source of truth가 아니라 DB 기반으로 재구성 가능한 파생 상태로 두고, 복구 테스트를 추가했습니다.
+- 동시 주문, 동시 체결, 취소/체결 경합 시나리오를 통합 테스트로 고정했습니다.
+
+결과:
+
+- 전체 테스트에서 주문, 체결, 지갑, 원장 정합성 검증을 통과했습니다.
+- Phase 1 거래 코어는 Kafka/WebSocket과 분리해도 독립적으로 정합성을 유지하는 기준선을 확보했습니다.
+- 이후 Kafka/WebSocket은 거래 트랜잭션의 source of truth를 바꾸지 않는 외부 전파 계층으로 확장했습니다.
+
+### 2. WebSocket/Kafka 실시간 전파 병목 개선
+
+문제 상황:
+
+- `50 subscribers / 50 order/s` 부하에서 WebSocket trade feed p95 지연이 `14.49s`까지 상승했습니다.
+- 테스트 종료 시점의 Outbox backlog와 Kafka consumer lag는 `0`이었으나, 테스트 window 안에서는 Kafka Consumer에서 WebSocket broadcast까지의 전파가 밀렸습니다.
+- 단순히 Kafka를 붙인 것만으로는 실시간성이 보장되지 않았고, 전파 지연을 별도 지표로 측정해야 했습니다.
+
+해결 방법:
+
+- k6 WebSocket/STOMP 부하 테스트를 추가해 `/topic/trades/{market}`, `/topic/orderbook/{market}` 수신 여부와 trade delivery lag를 측정했습니다.
+- WebSocket outbound channel executor를 명시적으로 설정했습니다.
+- trade feed와 orderbook broadcast duration, sent count를 Micrometer metric으로 기록했습니다.
+- Outbox Publisher 발행 주기와 batch size를 조정해 이벤트 발행 cadence를 개선했습니다.
+- 오더북 broadcast는 주문 이벤트마다 full snapshot을 무조건 보내지 않고 coalescing하도록 조정했습니다.
+
+결과:
+
+| Scenario | Before | After |
+|---|---:|---:|
+| `50 subscribers / 50 order/s` trade lag p95 | `14.49s` | `250ms` |
+| `50 subscribers / 50 order/s` trade lag p99 | `15.11s` | `261ms` |
+| Kafka consumer lag | `0` | `0` |
+| Server errors | `0` | `0` |
+
+### 3. 오더북 브로드캐스트 락 경합 개선
+
+문제 상황:
+
+- `50 subscribers / 100 order/s` 부하에서 `orderbook broadcast duration` max가 `2.40s`까지 상승했습니다.
+- 같은 구간에서 Order API latency max도 `2.49s`까지 상승했습니다.
+- Kafka consumer lag, Hikari pending connection, 5xx는 모두 `0`이었습니다.
+- 따라서 병목은 Kafka backlog나 DB connection pool 고갈이 아니라, 오더북 snapshot broadcast가 주문 생성 경로의 market lock과 경합하는 문제로 판단했습니다.
+
+Before:
+
+![Before orderbook broadcast lock contention](.docs/images/before-orderbook-lock-contention.png)
+
+해결 방법:
+
+- WebSocket 오더북 브로드캐스트에서 `OrderService` market lock 의존을 제거했습니다.
+- `MemoryOrderBook`에 synchronized snapshot API를 추가해 buy/sell side를 짧은 오더북 내부 lock 범위에서 함께 복사하도록 변경했습니다.
+- REST 오더북 조회도 동일한 `MatchingEngine.snapshot()` 경로를 사용하도록 정리했습니다.
+- `websocket.orderbook.snapshot.duration` metric을 추가해 snapshot 생성 시간과 broadcast 시간을 분리해 관측했습니다.
+
+After:
+
+![After orderbook broadcast lock contention](.docs/images/after-orderbook-lock-contention.png)
+
+결과:
+
+| Metric | Before | After |
+|---|---:|---:|
+| `websocket.orderbook.broadcast.duration` max | `2.4019s` | `4.44ms` |
+| `websocket.orderbook.broadcast.duration` sum | `60.617s` | `44ms` |
+| `websocket.orderbook.snapshot.duration` max | - | `564us` |
+| `ws_trade_delivery_lag` p95 | `2.012s` | `284ms` |
+| Kafka consumer lag | `0` | `0` |
+| Hikari pending connection | `0` | `0` |
+| 5xx | `0` | `0` |
+| Order API latency max | `2.49s` | `3.11s` |
+
+인사이트:
+
+- 오더북 브로드캐스트 락 경합은 제거된 것으로 판단했습니다.
+- 다만 Order API latency max는 `3.11s`로 남아 있어, 주문 생성 지연의 전체 원인은 아직 해결되지 않았습니다.
+- 후속 병목은 주문 생성 트랜잭션의 market lock, DB pessimistic lock, transaction hold time으로 분리했습니다.
+
+상세 실행 결과는 [Test Results](.docs/TEST_RESULTS.md)에 기록했습니다.
+
+## 트러블 슈팅
+
+### 1. 성능 테스트 측정값 왜곡 방지
+
+문제 상황:
+
+- 앱 재기동 직후 Kafka/Outbox에 과거 이벤트 backlog가 남아 있으면 첫 실행의 `ws_trade_delivery_lag`가 크게 튈 수 있었습니다.
+- 셸 환경의 `DEBUG=release` 값이 Spring Boot debug logging을 활성화해 부하 테스트 결과에 영향을 줄 수 있었습니다.
+
+해결 방법:
+
+- 성능 측정은 `DEBUG=false`로 애플리케이션을 재기동한 뒤 수행했습니다.
+- 테스트 종료 시점에 Outbox unpublished event와 Kafka consumer lag를 함께 확인했습니다.
+- k6 summary와 Prometheus scrape 원본을 함께 저장해 Grafana 캡처와 수치를 대조했습니다.
+
+### 2. 로컬 인프라 포트 혼동 제거
+
+문제 상황:
+
+- 로컬에 직접 설치된 MySQL과 Docker MySQL이 서로 다른 포트를 사용하면서 테스트 환경이 헷갈릴 수 있었습니다.
+
+해결 방법:
+
+- Docker MySQL을 `3306:3306`으로 통일했습니다.
+- 로컬 MySQL이 `3306`을 점유하는 경우 해당 서비스를 중지하고 Docker MySQL을 사용하도록 정리했습니다.
 
 ## 실행 방법
 
@@ -77,7 +240,11 @@ Phase 1 완료 이후 리뷰 과정에서 zero-quote 체결 방지, dust maker �
 docker compose up -d mysql kafka
 ```
 
-Kafka 없이도 주문/체결 트랜잭션은 실패하지 않지만, `domain_events`는 미발행 상태로 남고 Outbox Publisher가 재시도합니다. Kafka 발행과 WebSocket broadcast를 끄고 코어 API만 확인하려면 `OUTBOX_ENABLED=false WEBSOCKET_TRADE_FEED_ENABLED=false WEBSOCKET_ORDERBOOK_ENABLED=false`로 실행합니다.
+Kafka 없이도 주문/체결 트랜잭션은 실패하지 않지만, `domain_events`는 미발행 상태로 남고 Outbox Publisher가 재시도합니다. Kafka 발행과 WebSocket broadcast를 끄고 코어 API만 확인하려면 다음 옵션으로 실행합니다.
+
+```bash
+OUTBOX_ENABLED=false WEBSOCKET_TRADE_FEED_ENABLED=false WEBSOCKET_ORDERBOOK_ENABLED=false ./gradlew bootRun
+```
 
 ### 2. 애플리케이션 실행
 
@@ -85,7 +252,7 @@ Kafka 없이도 주문/체결 트랜잭션은 실패하지 않지만, `domain_ev
 ./gradlew bootRun
 ```
 
-기본 DB 접속 정보는 다음과 같습니다.
+기본 DB 접속 정보:
 
 ```properties
 spring.datasource.url=jdbc:mysql://localhost:3306/coinflow?serverTimezone=Asia/Seoul&characterEncoding=UTF-8
@@ -93,11 +260,7 @@ spring.datasource.username=coinflow
 spring.datasource.password=coinflow
 ```
 
-로컬 실행 기준은 Docker MySQL의 `3306:3306` 포트 매핑입니다. 로컬에 직접 설치된 MySQL이 `3306`을 점유하고 있다면 해당 서비스를 중지하고 Docker MySQL을 사용합니다.
-
 ### 3. API 문서
-
-애플리케이션 실행 후 Swagger UI에서 API를 확인할 수 있습니다.
 
 ```text
 http://localhost:8080/swagger-ui/index.html
@@ -105,13 +268,11 @@ http://localhost:8080/swagger-ui/index.html
 
 ### 4. 로컬 모니터링
 
-애플리케이션은 기본 설정으로 `/actuator/prometheus`를 노출합니다. Prometheus와 Grafana는 로컬 `bootRun` 애플리케이션을 `host.docker.internal:8080`으로 scrape합니다.
+애플리케이션은 `/actuator/prometheus`를 노출합니다. Prometheus와 Grafana는 로컬 `bootRun` 애플리케이션을 `host.docker.internal:8080`으로 scrape합니다.
 
 ```bash
 docker compose up -d prometheus grafana
 ```
-
-접속 주소:
 
 | 도구 | URL | 기본 계정 |
 |---|---|---|
@@ -122,19 +283,24 @@ Grafana에는 `CoinFlow Overview` 대시보드가 자동 등록됩니다.
 
 ## 테스트
 
-전체 테스트는 다음 명령으로 실행합니다.
+전체 테스트:
 
 ```bash
 ./gradlew test
 ```
 
-통합 테스트는 Testcontainers 기반 MySQL을 사용해 decimal, foreign key, transaction 경계와 핵심 정합성 시나리오를 실제 MySQL에 가깝게 검증합니다. 동시성 테스트와 k6 부하 테스트는 [Test Plan](.docs/TestPlan.md)에 계획을 분리해 두고, 실행 결과는 [Test Results](.docs/TEST_RESULTS.md)에 기록합니다.
+k6 부하 테스트:
+
+```bash
+k6 run k6/order-flow-load-test.js
+k6 run k6/websocket-kafka-load-test.js
+```
 
 주요 검증 범위:
 
 - 회원가입, 로그인, JWT 인증
 - BUY/SELL 주문 자산 잠금
-- 가격 우선 매칭
+- 가격 우선, 시간 우선 매칭
 - 부분 체결, 완전 체결
 - BUY taker 가격 차이 환불
 - SELL taker 정산
@@ -146,6 +312,8 @@ Grafana에는 `CoinFlow Overview` 대시보드가 자동 등록됩니다.
 - Outbox Publisher Kafka 발행
 - Kafka 발행 실패 시 outbox 재시도 상태 전이
 - Kafka Consumer 기반 WebSocket 체결 알림
+- WebSocket STOMP 실제 수신 E2E
+- Kafka Consumer 기반 WebSocket 오더북 snapshot broadcast
 - 지갑 잔고 음수 방지
 - 동일 사용자 동시 주문 시 잔고 음수 방지
 - 하나의 maker 주문에 대한 동시 taker 체결 수량 초과 방지
@@ -154,25 +322,38 @@ Grafana에는 `CoinFlow Overview` 대시보드가 자동 등록됩니다.
 - k6 기반 주문/조회 API 로컬 부하 테스트
 - k6 기반 WebSocket/Kafka 실시간 전파 부하 테스트
 
-k6 로컬 부하 테스트는 애플리케이션 실행 후 다음 명령으로 실행합니다.
+## 구현 범위와 제외 범위
 
-```bash
-k6 run k6/order-flow-load-test.js
-k6 run k6/websocket-kafka-load-test.js
-```
+구현 범위:
 
-WebSocket feed는 STOMP client로 `/ws`에 연결한 뒤 시장별 topic을 구독해 확인합니다.
+- 회원가입, 로그인, JWT access token 인증
+- 사용자별 지갑 자동 생성 및 데이터 분리
+- 지정가 `BUY` / `SELL` 주문 생성
+- 주문 취소
+- 가격 우선, 시간 우선 매칭
+- 부분 체결, 완전 체결
+- 체결 시 buyer/seller 지갑 정산
+- append-only 지갑 원장 기록
+- 시장, 오더북, 최근 체결, 사용자 fill, 지갑, 원장 조회
+- 서버 시작 시 DB의 미체결 주문으로 인메모리 오더북 초기화
+- 주문/체결/정산 도메인 이벤트 로그 저장
+- Outbox Publisher 기반 Kafka 이벤트 발행
+- Kafka Consumer 기반 WebSocket 실시간 체결 push
+- Kafka Consumer 기반 WebSocket 오더북 snapshot push
 
-| 항목 | 값 |
-|---|---|
-| WebSocket endpoint | `ws://localhost:8080/ws` |
-| 체결 feed topic | `/topic/trades/{market}` |
-| 체결 예시 topic | `/topic/trades/BTC-KRW` |
-| 체결 메시지 필드 | `eventId`, `market`, `price`, `quantity`, `side`, `tradedAt` |
-| 오더북 feed topic | `/topic/orderbook/{market}` |
-| 오더북 예시 topic | `/topic/orderbook/BTC-KRW` |
-| 오더북 메시지 필드 | `eventId`, `market`, `bids`, `asks` |
-| 오더북 price level 필드 | `price`, `quantity` |
+제외 범위:
+
+- 입금/출금
+- 시장가 주문
+- IOC/FOK/GTT, post-only, iceberg 주문
+- 수수료
+- refresh token, OAuth/social login, role/permission
+- WebSocket 연결 인증/권한 분리
+- Redis, 서버 분리
+- replay, redrive, reconciliation
+- 관리자 페이지
+
+일부 로컬 개발 편의를 위한 API와 인프라 기반은 존재하지만, 운영 기능 범위와 구분합니다. 예를 들어 dev/test 입금 보조 API는 `prod` 프로필에서 제외됩니다.
 
 ## 문서
 
@@ -185,18 +366,19 @@ WebSocket feed는 STOMP client로 `/ws`에 연결한 뒤 시장별 topic을 구�
 | [API](.docs/API.md) | REST API 계약과 에러 코드 |
 | [ERD](.docs/ERD.md) | 테이블 구조와 관계 |
 | [Test Plan](.docs/TestPlan.md) | 핵심 통합 테스트, 동시성 테스트, k6 부하 테스트 계획 |
-| [Test Results](.docs/TEST_RESULTS.md) | 동시성/k6 테스트 실행 결과 기록 템플릿 |
+| [Test Results](.docs/TEST_RESULTS.md) | 동시성/k6 테스트 실행 결과 |
 | [Order Flow](.docs/ORDER_FLOW.md) | 주문 생성부터 체결/정산/오더북 반영까지의 내부 흐름 |
 | [Issues](.docs/ISSUES.md) | Phase 1 이후 코드 리뷰 이슈와 보강 내용 |
 | [Reference](.docs/Reference.md) | 설계 판단 근거와 외부 거래소 API 레퍼런스 |
 
 ## 다음 단계
 
-현재 구현 완료 범위는 Phase 1 거래 코어와 Phase 2 이벤트 기반 외부 전파입니다. Phase 1 거래 코어의 동시성/부하 테스트와 로컬 관측 구성을 마쳤고, Phase 2에서는 Outbox 기반 Kafka 발행, Kafka Consumer 기반 WebSocket 체결 feed, 실제 STOMP 수신 E2E, 오더북 snapshot broadcast까지 연결했습니다.
+현재 구현 완료 범위는 Phase 1 거래 코어와 Phase 2 이벤트 기반 외부 전파입니다.
 
+- 주문 생성 경로의 market lock 보유 시간 계측
+- DB pessimistic lock 대기 시간과 transaction hold time 분리
 - WebSocket 연결 인증/권한 분리
-- WebSocket/Kafka 실시간 전파 부하 테스트
 - 매칭 엔진 성능 기준선 측정
 - 정산 Batch 추가
 
-WebSocket 인증/권한 분리, Batch 정산은 아직 구현 완료 기능으로 표기하지 않습니다.
+WebSocket 인증/권한 분리와 Batch 정산은 아직 구현 완료 기능으로 표기하지 않습니다.

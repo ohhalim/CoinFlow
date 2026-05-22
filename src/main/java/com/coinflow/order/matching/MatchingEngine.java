@@ -67,6 +67,11 @@ public class MatchingEngine {
         return book != null ? book.getSellSide() : List.of();
     }
 
+    public OrderBookSnapshot snapshot(String marketSymbol) {
+        MemoryOrderBook book = orderBooks.get(marketSymbol);
+        return book != null ? book.snapshot() : OrderBookSnapshot.empty();
+    }
+
     public void clearAll() {
         orderBooks.clear();
     }

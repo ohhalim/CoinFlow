@@ -8,8 +8,7 @@ import com.coinflow.market.dto.MarketResponse;
 import com.coinflow.market.dto.OrderBookResponse;
 import com.coinflow.market.repository.MarketRepository;
 import com.coinflow.order.matching.MatchingEngine;
-import com.coinflow.order.matching.OrderBookEntry;
-import com.coinflow.order.service.OrderService;
+import com.coinflow.order.matching.OrderBookSnapshot;
 import lombok.RequiredArgsConstructor;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
@@ -21,7 +20,6 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
-import java.util.concurrent.locks.ReentrantLock;
 
 @RestController
 @RequiredArgsConstructor
@@ -31,7 +29,6 @@ public class MarketController {
 
     private final MarketRepository marketRepository;
     private final MatchingEngine matchingEngine;
-    private final OrderService orderService;
 
     @GetMapping
     public List<MarketResponse> getMarkets() {
@@ -49,14 +46,7 @@ public class MarketController {
         Market found = marketRepository.findBySymbol(market)
                 .orElseThrow(() -> new ApiException(ErrorCode.MARKET_NOT_FOUND));
 
-        ReentrantLock lock = orderService.getMarketLock(found.getId());
-        lock.lock();
-        try {
-            List<OrderBookEntry> buySide  = matchingEngine.getBuySide(market);
-            List<OrderBookEntry> sellSide = matchingEngine.getSellSide(market);
-            return OrderBookResponse.of(market, buySide, sellSide, depth);
-        } finally {
-            lock.unlock();
-        }
+        OrderBookSnapshot snapshot = matchingEngine.snapshot(found.getSymbol());
+        return OrderBookResponse.of(market, snapshot.buySide(), snapshot.sellSide(), depth);
     }
 }

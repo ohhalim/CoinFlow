@@ -30,7 +30,7 @@ public class MemoryOrderBook {
         this.amountScale = amountScale;
     }
 
-    public List<MatchResult> planMatch(Order taker) {
+    public synchronized List<MatchResult> planMatch(Order taker) {
         PriorityQueue<OrderBookEntry> makerQueue = (taker.getSide() == OrderSide.BUY) ? sellQueue : buyQueue;
         PriorityQueue<OrderBookEntry> simulation = new PriorityQueue<>(makerQueue);
 
@@ -88,7 +88,7 @@ public class MemoryOrderBook {
         return results;
     }
 
-    public void applyMatchPlan(Order taker, List<MatchResult> plan) {
+    public synchronized void applyMatchPlan(Order taker, List<MatchResult> plan) {
         PriorityQueue<OrderBookEntry> makerQueue = (taker.getSide() == OrderSide.BUY) ? sellQueue : buyQueue;
 
         for (MatchResult result : plan) {
@@ -112,7 +112,7 @@ public class MemoryOrderBook {
         }
     }
 
-    public void add(Order order) {
+    public synchronized void add(Order order) {
         OrderBookEntry entry = OrderBookEntry.from(order);
         if (order.getSide() == OrderSide.BUY) {
             buyQueue.add(entry);
@@ -121,12 +121,12 @@ public class MemoryOrderBook {
         }
     }
 
-    public void remove(Long orderId, OrderSide side) {
+    public synchronized void remove(Long orderId, OrderSide side) {
         PriorityQueue<OrderBookEntry> queue = (side == OrderSide.BUY) ? buyQueue : sellQueue;
         queue.removeIf(e -> e.orderId().equals(orderId));
     }
 
-    public boolean hasSelfTrade(OrderSide takerSide, BigDecimal takerPrice, Long userId) {
+    public synchronized boolean hasSelfTrade(OrderSide takerSide, BigDecimal takerPrice, Long userId) {
         PriorityQueue<OrderBookEntry> makerQueue = (takerSide == OrderSide.BUY) ? sellQueue : buyQueue;
         for (OrderBookEntry maker : makerQueue) {
             boolean priceMatches = (takerSide == OrderSide.BUY)
@@ -137,14 +137,26 @@ public class MemoryOrderBook {
         return false;
     }
 
-    public List<OrderBookEntry> getBuySide() {
+    public synchronized List<OrderBookEntry> getBuySide() {
+        return sortedBuySide();
+    }
+
+    public synchronized List<OrderBookEntry> getSellSide() {
+        return sortedSellSide();
+    }
+
+    public synchronized OrderBookSnapshot snapshot() {
+        return new OrderBookSnapshot(sortedBuySide(), sortedSellSide());
+    }
+
+    private List<OrderBookEntry> sortedBuySide() {
         return buyQueue.stream()
                 .sorted(Comparator.comparing(OrderBookEntry::price).reversed()
                         .thenComparing(OrderBookEntry::sequence))
                 .toList();
     }
 
-    public List<OrderBookEntry> getSellSide() {
+    private List<OrderBookEntry> sortedSellSide() {
         return sellQueue.stream()
                 .sorted(Comparator.comparing(OrderBookEntry::price)
                         .thenComparing(OrderBookEntry::sequence))
