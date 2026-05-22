@@ -27,6 +27,7 @@ import com.coinflow.wallet.domain.Wallet;
 import com.coinflow.wallet.domain.WalletLedger;
 import com.coinflow.wallet.repository.WalletLedgerRepository;
 import com.coinflow.wallet.repository.WalletRepository;
+import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 import com.coinflow.common.pagination.OffsetBasedPageRequest;
 import org.springframework.stereotype.Service;
@@ -44,11 +45,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Supplier;
 
 @Slf4j
 @Service
 public class OrderService {
+
+    private static final String ORDER_CREATE_STAGE_TIMER = "order.create.stage.duration";
 
     private final MarketRepository marketRepository;
     private final OrderRepository orderRepository;
@@ -60,6 +65,7 @@ public class OrderService {
     private final OrderBookRecoveryService orderBookRecoveryService;
     private final DomainEventRecorder eventRecorder;
     private final TransactionTemplate transactionTemplate;
+    private final MeterRegistry meterRegistry;
 
     private final Map<Long, ReentrantLock> marketLocks = new ConcurrentHashMap<>();
 
@@ -73,7 +79,8 @@ public class OrderService {
             MatchingEngine matchingEngine,
             OrderBookRecoveryService orderBookRecoveryService,
             DomainEventRecorder eventRecorder,
-            PlatformTransactionManager transactionManager
+            PlatformTransactionManager transactionManager,
+            MeterRegistry meterRegistry
     ) {
         this.marketRepository = marketRepository;
         this.orderRepository = orderRepository;
@@ -85,9 +92,11 @@ public class OrderService {
         this.orderBookRecoveryService = orderBookRecoveryService;
         this.eventRecorder = eventRecorder;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
+        this.meterRegistry = meterRegistry;
     }
 
     public CreateOrderResponse createOrder(Long currentUserId, CreateOrderRequest request) {
+        long createStartedAt = System.nanoTime();
 
         // 1. market 조회 및 검증
         Market market = marketRepository.findBySymbol(request.market())
@@ -124,29 +133,51 @@ public class OrderService {
 
         // 3. 시장별 lock 획득
         ReentrantLock marketLock = marketLocks.computeIfAbsent(market.getId(), k -> new ReentrantLock());
+        long marketLockWaitStartedAt = System.nanoTime();
         marketLock.lock();
+        long marketLockAcquiredAt = System.nanoTime();
+        recordOrderCreateStage(market.getSymbol(), side, "market_lock_wait",
+                marketLockAcquiredAt - marketLockWaitStartedAt);
         try {
-            return transactionTemplate.execute(status -> {
+            return recordOrderCreateStage(market.getSymbol(), side, "transaction_template", () ->
+                    transactionTemplate.execute(status -> {
+                long transactionCallbackStartedAt = System.nanoTime();
+                try {
 
                 // clientOrderId 중복 검증
-                if (request.clientOrderId() != null &&
-                        orderRepository.existsByUserIdAndClientOrderId(currentUserId, request.clientOrderId())) {
-                    throw new ApiException(ErrorCode.DUPLICATE_CLIENT_ORDER_ID);
+                if (request.clientOrderId() != null) {
+                    boolean duplicatedClientOrderId = recordOrderCreateStage(
+                            market.getSymbol(), side, "client_order_id_check",
+                            () -> orderRepository.existsByUserIdAndClientOrderId(currentUserId, request.clientOrderId())
+                    );
+                    if (duplicatedClientOrderId) {
+                        throw new ApiException(ErrorCode.DUPLICATE_CLIENT_ORDER_ID);
+                    }
                 }
 
                 // self-trade 사전 검증 (MAT-006)
-                if (matchingEngine.hasSelfTrade(market.getSymbol(), side, price, currentUserId)) {
+                boolean hasSelfTrade = recordOrderCreateStage(
+                        market.getSymbol(), side, "self_trade_check",
+                        () -> matchingEngine.hasSelfTrade(market.getSymbol(), side, price, currentUserId)
+                );
+                if (hasSelfTrade) {
                     throw new ApiException(ErrorCode.SELF_TRADE_NOT_ALLOWED);
                 }
 
                 // sequence 발급
-                OrderSequence seq = orderSequenceRepository.findByMarketIdWithLock(market.getId())
-                        .orElseThrow(() -> new ApiException(ErrorCode.MARKET_NOT_FOUND));
+                OrderSequence seq = recordOrderCreateStage(
+                        market.getSymbol(), side, "sequence_lock",
+                        () -> orderSequenceRepository.findByMarketIdWithLock(market.getId())
+                                .orElseThrow(() -> new ApiException(ErrorCode.MARKET_NOT_FOUND))
+                );
                 Long sequence = seq.nextSequence();
 
                 // wallet lock
-                Wallet wallet = walletRepository.findByUserIdAndAssetWithLock(currentUserId, lockedAsset)
-                        .orElseThrow(() -> new ApiException(ErrorCode.INSUFFICIENT_BALANCE));
+                Wallet wallet = recordOrderCreateStage(
+                        market.getSymbol(), side, "taker_wallet_lock",
+                        () -> walletRepository.findByUserIdAndAssetWithLock(currentUserId, lockedAsset)
+                                .orElseThrow(() -> new ApiException(ErrorCode.INSUFFICIENT_BALANCE))
+                );
                 if (wallet.getAvailableBalance().compareTo(lockedAmount) < 0)
                     throw new ApiException(ErrorCode.INSUFFICIENT_BALANCE);
                 wallet.lock(lockedAmount);
@@ -159,25 +190,34 @@ public class OrderService {
                         lockedAsset, lockedAmount,
                         sequence, request.clientOrderId()
                 );
-                orderRepository.save(order);
+                recordOrderCreateStage(market.getSymbol(), side, "order_save",
+                        () -> orderRepository.save(order));
                 eventRecorder.recordOrderAccepted(order);
 
                 // ORDER_LOCK ledger
-                walletLedgerRepository.save(WalletLedger.create(
+                recordOrderCreateStage(market.getSymbol(), side, "order_lock_ledger_save", () ->
+                        walletLedgerRepository.save(WalletLedger.create(
                         wallet, LedgerType.ORDER_LOCK,
                         lockedAmount.negate(), lockedAmount,
                         order.getId(), null
-                ));
+                )));
 
                 // 매칭 계획 수립 (큐 미변경), 정산
-                List<MatchResult> plan = matchingEngine.planMatch(market, order);
+                List<MatchResult> plan = recordOrderCreateStage(
+                        market.getSymbol(), side, "matching_plan",
+                        () -> matchingEngine.planMatch(market, order)
+                );
                 List<Order> autoCanceledMakers = new ArrayList<>();
-                List<Trade> trades = settle(market, order, plan, autoCanceledMakers);
+                List<Trade> trades = recordOrderCreateStage(
+                        market.getSymbol(), side, "settlement",
+                        () -> settle(market, order, plan, autoCanceledMakers)
+                );
 
                 // 커밋 성공 후 오더북 반영 — DB 롤백 시 큐는 그대로
                 TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
                     @Override
                     public void afterCommit() {
+                        long orderBookApplyStartedAt = System.nanoTime();
                         try {
                             matchingEngine.applyMatchPlan(market, order, plan);
                             autoCanceledMakers.forEach(canceledMaker ->
@@ -185,13 +225,24 @@ public class OrderService {
                         } catch (Exception e) {
                             log.error("오더북 applyMatchPlan 실패: orderId={}, DB 체결 내역 기반 재빌드 시도", order.getId(), e);
                             orderBookRecoveryService.rebuildAfterApplyFailure(market.getId());
+                        } finally {
+                            recordOrderCreateStage(market.getSymbol(), side, "orderbook_after_commit",
+                                    System.nanoTime() - orderBookApplyStartedAt);
                         }
                     }
                 });
 
                 return CreateOrderResponse.of(order, trades);
-            });
+                } finally {
+                    recordOrderCreateStage(market.getSymbol(), side, "transaction_callback",
+                            System.nanoTime() - transactionCallbackStartedAt);
+                }
+            }));
         } finally {
+            recordOrderCreateStage(market.getSymbol(), side, "market_lock_hold",
+                    System.nanoTime() - marketLockAcquiredAt);
+            recordOrderCreateStage(market.getSymbol(), side, "total",
+                    System.nanoTime() - createStartedAt);
             marketLock.unlock();
         }
     }
@@ -272,7 +323,10 @@ public class OrderService {
         List<Trade> trades = new ArrayList<>();
 
         for (MatchResult result : matchResults) {
-            Order maker = orderRepository.findByIdWithLock(result.makerOrderId()).orElseThrow();
+            Order maker = recordOrderCreateStage(
+                    market.getSymbol(), taker.getSide(), "maker_order_lock",
+                    () -> orderRepository.findByIdWithLock(result.makerOrderId()).orElseThrow()
+            );
             if (!maker.isCancelable()) {
                 throw new ApiException(ErrorCode.ORDER_NOT_FOUND);
             }
@@ -295,6 +349,8 @@ public class OrderService {
             WalletKey sellerBaseKey = new WalletKey(result.sellUserId(), market.getBaseAsset());
             WalletKey buyerQuoteKey = new WalletKey(result.buyUserId(), market.getQuoteAsset());
             Map<WalletKey, Wallet> wallets = lockWalletsInOrder(
+                    market.getSymbol(),
+                    taker.getSide(),
                     buyerBaseKey,
                     sellerQuoteKey,
                     sellerBaseKey,
@@ -379,7 +435,7 @@ public class OrderService {
         return trades;
     }
 
-    private Map<WalletKey, Wallet> lockWalletsInOrder(WalletKey... keys) {
+    private Map<WalletKey, Wallet> lockWalletsInOrder(String marketSymbol, OrderSide side, WalletKey... keys) {
         List<WalletKey> sortedKeys = Stream.of(keys)
                 .distinct()
                 .sorted()
@@ -387,8 +443,11 @@ public class OrderService {
 
         Map<WalletKey, Wallet> wallets = new HashMap<>();
         for (WalletKey key : sortedKeys) {
-            Wallet wallet = walletRepository.findByUserIdAndAssetWithLock(key.userId(), key.asset())
-                    .orElseThrow(() -> new ApiException(ErrorCode.WALLET_NOT_FOUND));
+            Wallet wallet = recordOrderCreateStage(
+                    marketSymbol, side, "settlement_wallet_lock",
+                    () -> walletRepository.findByUserIdAndAssetWithLock(key.userId(), key.asset())
+                            .orElseThrow(() -> new ApiException(ErrorCode.WALLET_NOT_FOUND))
+            );
             wallets.put(key, wallet);
         }
         return wallets;
@@ -421,5 +480,23 @@ public class OrderService {
     private BigDecimal parseBigDecimal(String value, ErrorCode errorCode) {
         try { return new BigDecimal(value); }
         catch (NumberFormatException e) { throw new ApiException(errorCode); }
+    }
+
+    private <T> T recordOrderCreateStage(String marketSymbol, OrderSide side, String stage, Supplier<T> supplier) {
+        long startedAt = System.nanoTime();
+        try {
+            return supplier.get();
+        } finally {
+            recordOrderCreateStage(marketSymbol, side, stage, System.nanoTime() - startedAt);
+        }
+    }
+
+    private void recordOrderCreateStage(String marketSymbol, OrderSide side, String stage, long elapsedNanos) {
+        meterRegistry.timer(
+                ORDER_CREATE_STAGE_TIMER,
+                "market", marketSymbol,
+                "side", side.name(),
+                "stage", stage
+        ).record(elapsedNanos, TimeUnit.NANOSECONDS);
     }
 }
