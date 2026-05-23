@@ -792,6 +792,7 @@ Context:
 | Kafka | Local Docker Kafka |
 | App run option | `DEBUG=false` |
 | Prometheus target | `up{job="coinflow"} = 1` |
+| Grafana capture | `.docs/images/order-transaction-begin-bottleneck.png` |
 
 Changes:
 
@@ -956,7 +957,95 @@ Next action:
 - 정산 저장, 원장 저장, 이벤트 저장을 포함한 transaction scope를 재검토한다.
 - 성능 테스트 전용 fresh DB/Kafka 환경에서 동일 조건을 재측정한다.
 
-## 18. 발견 이슈
+## 18. 주문 생성 트랜잭션 단계 계측 재측정
+
+Date: 2026-05-23
+
+Context:
+
+| 항목 | 값 |
+|---|---|
+| Issue | `#58` 주문 생성 트랜잭션 점유 시간 병목 분석 |
+| Branch | `perf/58/order-transaction-duration-analysis` |
+| DB | Local Docker MySQL 8 |
+| Kafka | Local Docker Kafka |
+| App run option | `DEBUG=false` |
+| Prometheus target | `up{job="coinflow"} = 1` |
+
+Changes:
+
+- `transaction_template` 내부를 transaction lifecycle 단계로 분리했다.
+- transaction callback 진입 전 대기, commit, afterCommit callback, afterCompletion callback 구간을 별도 stage로 계측했다.
+- Grafana `Order Create Critical Stage Max` 패널에 transaction phase 지표를 추가했다.
+
+Verification:
+
+```bash
+./gradlew test
+WS_SUBSCRIBERS=50 ORDER_RATE=100 DURATION=5m ORDER_VUS=40 ORDER_MAX_VUS=160 BUYER_COUNT=40 SELLER_COUNT=40 k6 run k6/websocket-kafka-load-test.js
+```
+
+Result:
+
+| 항목 | 결과 |
+|---|---:|
+| Full regression test | Passed |
+| k6 scenario status | FAIL: `order_create_duration p95 < 1000ms` 초과 |
+| HTTP failed | `0.00%` |
+| 5xx | `0` |
+| Checks | `2,774,919 / 2,774,919` passed |
+| Created orders | `26,374` |
+| Created trades | `13,187` |
+| Actual order throughput | `79.66 order/s` |
+| Dropped iterations | `3,626` |
+| WebSocket connections | `50` |
+| Trade messages | `659,350` |
+| OrderBook messages | `21,100` |
+| Trade delivery lag p95 / p99 / max | `1.44s` / `1.70s` / `2.36s` |
+| Order create p95 / p99 / max | `2.14s` / `2.67s` / `3.95s` |
+| HTTP request p95 / p99 / max | `2.14s` / `2.66s` / `3.95s` |
+| Kafka consumer lag | `0` |
+| Hikari active max over 10m | `10` |
+| Hikari pending max over 10m | `149` |
+| JVM GC pause max over 10m | `13ms` |
+
+Order create stage max:
+
+| stage | max |
+|---|---:|
+| `total` | `3.5791s` |
+| `transaction_template` | `2.4026s` |
+| `transaction_begin` | `2.2790s` |
+| `transaction_callback` | `323.82ms` |
+| `market_lock_wait` | `307.68ms` |
+| `market_lock_hold` | `135.11ms` |
+| `transaction_commit` | `90.33ms` |
+| `transaction_after_callback` | `90.46ms` |
+| `settlement` | `87.06ms` |
+| `sequence_lock` | `64.28ms` |
+| `order_lock_ledger_save` | `32.39ms` |
+| `maker_order_lock` | `32.12ms` |
+| `settlement_wallet_lock` | `32.09ms` |
+| `client_order_id_check` | `24.74ms` |
+| `order_save` | `14.54ms` |
+| `taker_wallet_lock` | `10.67ms` |
+| `orderbook_after_commit` | `0.13ms` |
+
+Finding:
+
+- 새 transaction phase 계측으로 `transaction_template` 지연의 주 구간이 `transaction_begin`임을 확인했다.
+- `transaction_begin max 2.2790s`는 transaction callback 진입 전 대기 시간이므로, 실제 주문 비즈니스 로직보다 DB connection 획득/transaction begin 대기 가능성이 높다.
+- 같은 10분 window에서 Hikari active max는 pool 기본 상한인 `10`, pending max는 `149`로 관측됐다.
+- Kafka consumer lag, 5xx, WebSocket/STOMP error는 모두 0으로 유지됐다.
+- `transaction_callback max 323.82ms`, `market_lock_wait max 307.68ms`, `commit max 90.33ms`로 관측되어 callback 내부보다 connection pool 대기가 더 큰 병목으로 판단한다.
+
+Next action:
+
+- Hikari maximum pool size를 환경 변수로 조정 가능하게 만들고, `10 / 20 / 30` 단계별로 동일 조건을 재측정한다.
+- pool size 증가만으로 해결되는지, DB lock/commit 시간이 함께 증가하는지 Grafana에서 확인한다.
+- transaction callback 내부의 market lock hold time과 settlement time이 pool 증설 후 새 병목으로 이동하는지 확인한다.
+
+## 19. 발견 이슈
 
 | ID | Severity | Symptom | Suspected cause | Action |
 |---|---|---|---|---|
@@ -964,6 +1053,7 @@ Next action:
 | WS-002 | MAJOR | `50 subscribers / 100 order/s`에서 orderbook broadcast max `1.63s`, trade lag p95 `1.23s` | OrderBook snapshot broadcast가 market lock을 잡고 주문 생성 경로와 경합 | `#51`에서 market lock 의존 제거 후 orderbook broadcast max `0.0040s`, trade lag p95 `290ms`로 개선 |
 | ORD-001 | MAJOR | `50 subscribers / 100 order/s`에서 order create p95가 `1s`로 남고 dropped iteration `256` 발생 | `market_lock_wait max 1.2319s`; 동일 market 주문 직렬화 대기 | `#57`에서 clientOrderId 조회를 market lock 밖으로 이동 |
 | ORD-002 | MAJOR | `50 subscribers / 100 order/s / 5m`에서 order create p95 `2.63s`, dropped iteration `4,582` 발생 | `transaction_template max 3.7715s`, Hikari pending 상승 | 주문 생성 transaction scope 및 DB connection 점유 시간 축소 |
+| ORD-003 | MAJOR | transaction phase 계측 후 order create p95 `2.14s`, Hikari pending max `149` 발생 | `transaction_begin max 2.2790s`; DB connection 획득/transaction begin 대기 | Hikari pool size 단계별 측정 및 DB lock/commit 동반 상승 여부 확인 |
 
 Severity:
 
@@ -971,7 +1061,7 @@ Severity:
 - `MAJOR`: 5xx, lock timeout, 반복 가능한 성능 병목
 - `MINOR`: 문서/로그/테스트 안정성 개선
 
-## 19. 후속 조치
+## 20. 후속 조치
 
 | Action | Owner | Status | Link |
 |---|---|---|---|
@@ -988,4 +1078,6 @@ Severity:
 | Reduce orderbook broadcast lock contention |  | DONE |  |
 | Measure order creation lock contention |  | DONE |  |
 | Reduce market lock wait contention |  | DONE |  |
+| Measure order transaction lifecycle bottleneck |  | DONE |  |
+| Tune order DB connection pool capacity |  | TODO |  |
 | Reduce order transaction hold time |  | TODO |  |
