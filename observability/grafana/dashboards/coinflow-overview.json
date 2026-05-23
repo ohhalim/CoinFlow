@@ -1312,13 +1312,13 @@
             "uid": "Prometheus"
           },
           "editorMode": "code",
-          "expr": "max by (stage) (order_create_stage_duration_seconds_max{application=\"$application\", stage=~\"market_lock_wait|market_lock_hold|sequence_lock|taker_wallet_lock|maker_order_lock|settlement_wallet_lock|transaction_template|transaction_callback\"}) * 1000",
+          "expr": "max by (stage) (order_create_stage_duration_seconds_max{application=\"$application\", stage=~\"market_lock_wait|market_lock_hold|sequence_lock|taker_wallet_lock|maker_order_lock|settlement_wallet_lock|transaction_template|transaction_begin|transaction_callback|transaction_before_commit_wait|transaction_before_completion|transaction_commit|transaction_after_commit_callbacks|transaction_after_commit_to_completion|transaction_after_completion_callbacks|transaction_completion_to_return|transaction_after_callback\"}) * 1000",
           "legendFormat": "max {{stage}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Order Create Lock Stage Max",
+      "title": "Order Create Critical Stage Max",
       "type": "timeseries"
     }
   ],
