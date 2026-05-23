@@ -1045,7 +1045,76 @@ Next action:
 - pool size 증가만으로 해결되는지, DB lock/commit 시간이 함께 증가하는지 Grafana에서 확인한다.
 - transaction callback 내부의 market lock hold time과 settlement time이 pool 증설 후 새 병목으로 이동하는지 확인한다.
 
-## 19. 발견 이슈
+## 19. Hikari pool size별 주문 생성 지연 재측정
+
+Date: 2026-05-24
+
+Context:
+
+| 항목 | 값 |
+|---|---|
+| Issue | `#61` Hikari pool size별 주문 생성 지연 재측정 |
+| Branch | `perf/61/hikari-pool-order-latency` |
+| DB | Local Docker MySQL 8 |
+| Kafka | Local Docker Kafka |
+| App run option | `DEBUG=false` |
+| Grafana capture | `.docs/images/hikari-pool-order-latency.png` |
+
+Changes:
+
+- Hikari maximum pool size 실행 옵션화
+  - `spring.datasource.hikari.maximum-pool-size=${DB_POOL_MAX_SIZE:10}`
+- pool size `10 / 20 / 30` 동일 조건 재측정
+- Hikari pending, `transaction_begin`, order create latency 상관관계 비교
+
+Verification:
+
+```bash
+./gradlew test
+
+DB_POOL_MAX_SIZE=10 ./gradlew bootRun
+WS_SUBSCRIBERS=50 ORDER_RATE=100 DURATION=5m ORDER_VUS=40 ORDER_MAX_VUS=160 BUYER_COUNT=40 SELLER_COUNT=40 k6 run k6/websocket-kafka-load-test.js
+
+DB_POOL_MAX_SIZE=20 ./gradlew bootRun
+WS_SUBSCRIBERS=50 ORDER_RATE=100 DURATION=5m ORDER_VUS=40 ORDER_MAX_VUS=160 BUYER_COUNT=40 SELLER_COUNT=40 k6 run k6/websocket-kafka-load-test.js
+
+DB_POOL_MAX_SIZE=30 ./gradlew bootRun
+WS_SUBSCRIBERS=50 ORDER_RATE=100 DURATION=5m ORDER_VUS=40 ORDER_MAX_VUS=160 BUYER_COUNT=40 SELLER_COUNT=40 k6 run k6/websocket-kafka-load-test.js
+```
+
+Result:
+
+| Pool size | Created orders | Throughput | Dropped iterations | Order p95 | Order p99 | Order max | Trade lag p95 | HTTP failed / 5xx |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `10` | `28,692` | `86.76 order/s` | `1,308` | `1.83s` | `2.15s` | `3.14s` | `1.19s` | `0.00% / 0` |
+| `20` | `29,702` | `89.60 order/s` | `298` | `1.52s` | `1.84s` | `3.23s` | `833ms` | `0.00% / 0` |
+| `30` | `27,867` | `84.86 order/s` | `2,133` | `2.11s` | `2.88s` | `5.73s` | `1.08s` | `0.00% / 0` |
+
+Prometheus max:
+
+| Pool size | Hikari active | Hikari pending | `transaction_begin` | `transaction_callback` | `transaction_commit` | `market_lock_wait` | `market_lock_hold` | Kafka lag | GC pause |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `10` | `10` | `147` | `1.7874s` | `325.20ms` | `56.02ms` | `318.91ms` | `89.39ms` | `0` | `8ms` |
+| `20` | `20` | `136` | `1.8384s` | `462.98ms` | `81.58ms` | `455.92ms` | `100.50ms` | `0` | `12ms` |
+| `30` | `30` | `129` | `3.2505s` | `1.1779s` | `110.03ms` | `1.1366s` | `301.75ms` | `0` | `11ms` |
+
+Finding:
+
+- Hikari pending은 pool size 증가에 따라 `147 -> 136 -> 129`로 감소.
+- order create p95와 dropped iterations 기준 최적 후보는 pool size `20`.
+- pool size `30`에서 `transaction_begin`, `transaction_callback`, `market_lock_wait`, `market_lock_hold` 동반 악화.
+- 단순 pool 증설은 connection 대기 일부 완화 효과만 확인.
+- pool size 과증설 시 DB lock/market lock 경합과 transaction callback 지연이 신규 병목으로 이동.
+- Kafka consumer lag, WebSocket/STOMP error, 5xx는 모든 구간에서 0 유지.
+- `50 subscribers / 100 order/s / 5m` 조건에서 p95 1초 기준은 미달성.
+
+Decision:
+
+- 로컬 기준 Hikari maximum pool size 후보값은 `20`.
+- 다음 개선 방향은 pool 추가 증설이 아니라 transaction callback 내부 DB lock/market lock 경합 완화.
+- 주문 생성 트랜잭션 점유 시간 축소 및 settlement/write path 분리 검토.
+
+## 20. 발견 이슈
 
 | ID | Severity | Symptom | Suspected cause | Action |
 |---|---|---|---|---|
@@ -1053,7 +1122,8 @@ Next action:
 | WS-002 | MAJOR | `50 subscribers / 100 order/s`에서 orderbook broadcast max `1.63s`, trade lag p95 `1.23s` | OrderBook snapshot broadcast가 market lock을 잡고 주문 생성 경로와 경합 | `#51`에서 market lock 의존 제거 후 orderbook broadcast max `0.0040s`, trade lag p95 `290ms`로 개선 |
 | ORD-001 | MAJOR | `50 subscribers / 100 order/s`에서 order create p95가 `1s`로 남고 dropped iteration `256` 발생 | `market_lock_wait max 1.2319s`; 동일 market 주문 직렬화 대기 | `#57`에서 clientOrderId 조회를 market lock 밖으로 이동 |
 | ORD-002 | MAJOR | `50 subscribers / 100 order/s / 5m`에서 order create p95 `2.63s`, dropped iteration `4,582` 발생 | `transaction_template max 3.7715s`, Hikari pending 상승 | 주문 생성 transaction scope 및 DB connection 점유 시간 축소 |
-| ORD-003 | MAJOR | transaction phase 계측 후 order create p95 `2.14s`, Hikari pending max `149` 발생 | `transaction_begin max 2.2790s`; DB connection 획득/transaction begin 대기 | Hikari pool size 단계별 측정 및 DB lock/commit 동반 상승 여부 확인 |
+| ORD-003 | MAJOR | transaction phase 계측 후 order create p95 `2.14s`, Hikari pending max `149` 발생 | `transaction_begin max 2.2790s`; DB connection 획득/transaction begin 대기 | `#61`에서 pool size `10 / 20 / 30` 단계별 측정 |
+| ORD-004 | MAJOR | pool size `30`에서 order create p95 `2.11s`, dropped iteration `2,133`으로 악화 | 과도한 DB connection 동시성으로 transaction callback, market lock 경합 증가 | transaction callback 내부 DB lock/market lock 경합 완화 |
 
 Severity:
 
@@ -1061,7 +1131,7 @@ Severity:
 - `MAJOR`: 5xx, lock timeout, 반복 가능한 성능 병목
 - `MINOR`: 문서/로그/테스트 안정성 개선
 
-## 20. 후속 조치
+## 21. 후속 조치
 
 | Action | Owner | Status | Link |
 |---|---|---|---|
@@ -1079,5 +1149,5 @@ Severity:
 | Measure order creation lock contention |  | DONE |  |
 | Reduce market lock wait contention |  | DONE |  |
 | Measure order transaction lifecycle bottleneck |  | DONE |  |
-| Tune order DB connection pool capacity |  | TODO |  |
+| Tune order DB connection pool capacity |  | DONE |  |
 | Reduce order transaction hold time |  | TODO |  |
