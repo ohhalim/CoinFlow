@@ -1041,7 +1041,64 @@ Bottleneck 판단 기준:
 | `settlement` 증가 | trade/order/wallet/ledger 저장 및 정산 병목 |
 | `orderbook_after_commit` 증가 | commit 이후 orderbook 반영 비용 |
 
-## 14. Invariants
+## 14. MySQL Lock Wait Observation
+
+주문 생성 지연이 `transaction_begin` 또는 Hikari pending으로 관측될 때는 애플리케이션 stage 지표만으로 DB connection 대기와 MySQL 내부 lock wait를 구분하기 어렵다. 동일 부하 조건에서 MySQL 내부 대기 지표를 함께 수집해 병목 계층을 분리한다.
+
+수집 명령:
+
+```bash
+INTERVAL_SECONDS=2 DURATION_SECONDS=300 scripts/mysql-lock-wait-snapshot.sh
+```
+
+운영 방법:
+
+- 애플리케이션 실행 후 별도 터미널에서 MySQL snapshot 수집기를 먼저 시작한다.
+- snapshot 수집이 시작된 뒤 동일 시간대에 k6 부하 테스트를 실행한다.
+- 5분 부하 기준 snapshot duration은 warmup과 종료 여유를 포함해 `330s`로 둔다.
+
+부하 조건:
+
+| 항목 | 값 |
+|---|---:|
+| WebSocket subscribers | `50` |
+| Order rate | `100/s` |
+| Duration | `5m` |
+| Hikari pool size | `20` |
+| Order VUs / Max VUs | `40` / `160` |
+| Buyer / Seller count | `40` / `40` |
+
+MySQL 수집 항목:
+
+| 항목 | 목적 |
+|---|---|
+| `performance_schema.data_lock_waits` | waiting transaction과 blocking transaction 관계 확인 |
+| `performance_schema.data_locks` | table/index별 lock 상태와 lock mode 확인 |
+| `information_schema.innodb_trx` | active transaction, lock wait transaction, transaction age 확인 |
+| `SHOW ENGINE INNODB STATUS` | InnoDB lock wait 상세 로그 확인 |
+| `SHOW GLOBAL STATUS LIKE 'Innodb_row_lock%'` | row lock wait 누적 카운터 확인 |
+| `information_schema.PROCESSLIST` | DB connection 상태와 대기 state 확인 |
+| `events_statements_summary_by_digest` | 부하 구간 상위 SQL digest 확인 |
+
+애플리케이션 지표와의 매칭 기준:
+
+| 현상 | 판단 기준 |
+|---|---|
+| Hikari pending 증가, MySQL lock wait 미관측 | DB connection 획득 대기 또는 DB 처리량 한계 |
+| `data_lock_waits`에 waiting/blocking transaction 존재 | MySQL row lock wait 병목 |
+| `innodb_trx`에 `LOCK WAIT` transaction 존재 | InnoDB transaction lock wait 병목 |
+| `transaction_begin` 증가, `PROCESSLIST` 대기 증가 | connection 획득 이후 transaction begin 또는 DB thread 대기 |
+| `transaction_callback`과 wallet/order lock stage 증가 | transaction 내부 row lock 또는 write 경합 |
+| `transaction_commit` 증가 | flush/commit 구간 병목 |
+| Kafka lag, WebSocket error, 5xx 미관측 | 실시간 전파와 서버 오류는 병목 후보에서 제외 |
+
+결과 기록:
+
+- `.docs/TEST_RESULTS.md`에 k6, Grafana, MySQL snapshot을 같은 시간대로 정리한다.
+- 수집 로그는 `/private/tmp/coinflow-mysql-lock-wait/{RUN_ID}`에 저장한다.
+- PR에는 raw log 전체를 포함하지 않고 요약 표와 필요한 캡처만 포함한다.
+
+## 15. Invariants
 
 모든 통합 테스트 후 아래 불변식을 검증한다.
 

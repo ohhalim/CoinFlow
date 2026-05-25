@@ -1214,7 +1214,123 @@ Decision:
 - 잔여 병목은 `transaction_begin` 대기와 callback 내부 `market_lock_wait`로 분리한다.
 - 다음 개선은 settlement write 최적화보다 주문 생성 트랜잭션 진입 대기와 market lock 대기 완화에 우선순위를 둔다.
 
-## 21. 발견 이슈
+## 21. 주문 생성 DB lock wait 병목 분석
+
+Date: 2026-05-25
+
+Context:
+
+| 항목 | 값 |
+|---|---|
+| Issue | `#66` 주문 생성 DB lock wait 병목 분석 |
+| Branch | `perf/66/order-db-lock-wait-analysis` |
+| DB | Local Docker MySQL 8 |
+| Kafka | Local Docker Kafka |
+| Hikari pool size | `20` |
+| MySQL snapshot | `/private/tmp/coinflow-mysql-lock-wait/issue66-50ws-100rps-5m-20260525-214027` |
+
+Grafana evidence:
+
+![Order DB lock wait Grafana](images/order-db-lock-wait-grafana.png)
+
+Measurement scope:
+
+- `transaction_begin` 지연 원인 후보 분리
+- Hikari pending과 MySQL 내부 lock wait 동시 관측
+- Kafka/WebSocket 전파 구간과 주문 생성 DB 병목 구간 분리
+
+Verification:
+
+```bash
+./gradlew test
+
+# terminal 1
+DB_POOL_MAX_SIZE=20 DEBUG=false ./gradlew bootRun
+
+# terminal 2
+RUN_ID=issue66-50ws-100rps-5m \
+INTERVAL_SECONDS=2 \
+DURATION_SECONDS=330 \
+scripts/mysql-lock-wait-snapshot.sh
+
+# terminal 3
+WS_SUBSCRIBERS=50 ORDER_RATE=100 DURATION=5m ORDER_VUS=40 ORDER_MAX_VUS=160 BUYER_COUNT=40 SELLER_COUNT=40 k6 run k6/websocket-kafka-load-test.js
+```
+
+Result:
+
+| 항목 | 결과 |
+|---|---:|
+| Full regression test | Passed |
+| k6 scenario status | FAIL: `order_create_duration p95 < 1000ms` 초과 |
+| HTTP failed | `0.00%` |
+| 5xx | `0` |
+| Checks | `2,624,567 / 2,624,567` passed |
+| Created orders | `24,898` |
+| Created trades | `12,449` |
+| Actual order throughput | `75.15 order/s` |
+| Dropped iterations | `5,102` |
+| Order create p95 / p99 / max | `2.31s` / `2.76s` / `4.50s` |
+| Trade delivery lag p95 / p99 / max | `1.44s` / `1.70s` / `2.79s` |
+| Kafka consumer lag | `0` |
+| Hikari active max | `20` |
+| Hikari pending max | `140` |
+| JVM GC pause max | `11ms` |
+
+MySQL snapshot summary:
+
+| 항목 | 결과 |
+|---|---:|
+| `performance_schema.data_lock_waits` max | `0` |
+| `performance_schema.data_locks` max | `420` |
+| `information_schema.innodb_trx` max | `20` |
+| `innodb_trx` `LOCK WAIT` max | `0` |
+| `Innodb_row_lock_waits` delta | `0` |
+| `Innodb_row_lock_time` delta | `0ms` |
+| 주요 waiting table/index | 없음 |
+| 주요 blocking table/index | 없음 |
+
+Order create stage max:
+
+| stage | max |
+|---|---:|
+| `total` | `4.5023s` |
+| `transaction_template` | `2.7541s` |
+| `transaction_begin` | `2.4967s` |
+| `transaction_callback` | `666.95ms` |
+| `market_lock_wait` | `657.22ms` |
+| `market_lock_hold` | `153.39ms` |
+| `transaction_commit` | `108.66ms` |
+| `settlement` | `77.22ms` |
+| `settlement_wallet_lock` | `52.82ms` |
+| `settlement_trade_event_save` | `41.60ms` |
+| `settlement_ledger_save` | `33.73ms` |
+
+Top SQL digest:
+
+| SQL digest | Count | Total | Avg |
+|---|---:|---:|---:|
+| `COMMIT` | `26,696` | `32.083s` | `1.202ms` |
+| `INSERT wallet_ledgers` | `74,774` | `10.283s` | `0.138ms` |
+| `UPDATE domain_events` | `74,694` | `9.692s` | `0.130ms` |
+| `INSERT domain_events` | `74,694` | `9.671s` | `0.129ms` |
+| `UPDATE wallets` | `74,774` | `8.961s` | `0.120ms` |
+| `INSERT orders` | `24,898` | `5.137s` | `0.206ms` |
+| `UPDATE orders` | `24,898` | `5.021s` | `0.202ms` |
+| `SELECT order_sequences FOR UPDATE` | `24,898` | `3.345s` | `0.134ms` |
+
+Decision:
+
+- MySQL row lock wait는 관측되지 않았다.
+- `data_lock_waits`, `innodb_trx LOCK WAIT`, `Innodb_row_lock_waits`는 모두 `0`으로 유지됐다.
+- Hikari active는 pool 상한 `20`에 도달했고 pending은 `140`까지 증가했다.
+- `transaction_begin max 2.4967s`가 `transaction_template max 2.7541s`의 대부분을 차지했다.
+- `transaction_callback max 666.95ms` 중 `market_lock_wait max 657.22ms`가 가장 큰 비중을 차지했다.
+- 트랜잭션 callback 내부 DB write와 MySQL row lock wait는 주요 병목에서 제외한다.
+- 현재 병목은 트랜잭션 진입 후 market lock 대기 때문에 DB connection이 점유되고, 후속 요청이 Hikari pending으로 밀리는 구조로 판단한다.
+- 다음 개선 방향은 market lock 획득을 DB transaction 시작 전으로 이동해 market 직렬화 대기가 DB connection을 점유하지 않도록 분리하는 것이다.
+
+## 22. 발견 이슈
 
 | ID | Severity | Symptom | Suspected cause | Action |
 |---|---|---|---|---|
@@ -1225,6 +1341,7 @@ Decision:
 | ORD-003 | MAJOR | transaction phase 계측 후 order create p95 `2.14s`, Hikari pending max `149` 발생 | `transaction_begin max 2.2790s`; DB connection 획득/transaction begin 대기 | `#61`에서 pool size `10 / 20 / 30` 단계별 측정 |
 | ORD-004 | MAJOR | pool size `30`에서 order create p95 `2.11s`, dropped iteration `2,133`으로 악화 | 과도한 DB connection 동시성으로 transaction callback, market lock 경합 증가 | transaction callback 내부 DB lock/market lock 경합 완화 |
 | ORD-005 | MAJOR | pool size `20`에서 order create p95 `1.91s`, dropped iteration `1,222` 유지 | `transaction_begin max 1.7400s`, `market_lock_wait max 377.54ms`; 내부 DB write stage는 수십 ms 이하 | transaction begin 대기와 market lock wait 분리 개선 |
+| ORD-006 | MAJOR | `50 subscribers / 100 order/s / 5m`에서 order create p95 `2.31s`, dropped iteration `5,102`, Hikari pending max `140` 발생 | MySQL row lock wait 미관측. transaction callback 진입 후 market lock 대기로 DB connection 점유 | market lock 획득을 DB transaction 시작 전으로 이동 |
 
 Severity:
 
@@ -1232,7 +1349,7 @@ Severity:
 - `MAJOR`: 5xx, lock timeout, 반복 가능한 성능 병목
 - `MINOR`: 문서/로그/테스트 안정성 개선
 
-## 22. 후속 조치
+## 23. 후속 조치
 
 | Action | Owner | Status | Link |
 |---|---|---|---|
@@ -1252,4 +1369,6 @@ Severity:
 | Measure order transaction lifecycle bottleneck |  | DONE |  |
 | Tune order DB connection pool capacity |  | DONE |  |
 | Measure transaction callback internal DB contention |  | DONE |  |
+| Measure MySQL DB lock wait bottleneck |  | DONE |  |
+| Move market lock acquisition before transaction start |  | TODO |  |
 | Reduce order transaction hold time |  | TODO |  |
