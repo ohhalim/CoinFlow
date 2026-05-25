@@ -1114,7 +1114,107 @@ Decision:
 - 다음 개선 방향은 pool 추가 증설이 아니라 transaction callback 내부 DB lock/market lock 경합 완화.
 - 주문 생성 트랜잭션 점유 시간 축소 및 settlement/write path 분리 검토.
 
-## 20. 발견 이슈
+## 20. 주문 생성 트랜잭션 내부 DB 경합 분석
+
+Date: 2026-05-25
+
+Context:
+
+| 항목 | 값 |
+|---|---|
+| Issue | `#64` 주문 생성 트랜잭션 내부 DB 경합 분석 |
+| Branch | `perf/64/order-transaction-db-contention` |
+| DB | Local Docker MySQL 8 |
+| Kafka | Local Docker Kafka |
+| Hikari pool size | `20` |
+| App run option | `DEBUG=false` |
+| Grafana capture | `.docs/images/order-transaction-db-contention.png` |
+
+Changes:
+
+- `transaction_callback` 내부 DB 작업을 세부 stage로 분리했다.
+- 주문 접수 event 저장, trade 저장, settlement event 저장, ledger 저장, wallet mutation, dust cancel 구간을 별도 계측했다.
+- Grafana `Order Create Critical Stage Max` 패널에 신규 stage를 추가했다.
+- `.docs/TestPlan.md`에 stage 정의와 병목 판단 기준을 반영했다.
+
+Verification:
+
+```bash
+./gradlew test
+
+DB_POOL_MAX_SIZE=20 DEBUG=false ./gradlew bootRun
+WS_SUBSCRIBERS=50 ORDER_RATE=100 DURATION=5m ORDER_VUS=40 ORDER_MAX_VUS=160 BUYER_COUNT=40 SELLER_COUNT=40 k6 run k6/websocket-kafka-load-test.js
+```
+
+Result:
+
+| 항목 | 결과 |
+|---|---:|
+| Full regression test | Passed |
+| k6 scenario status | FAIL: `order_create_duration p95 < 1000ms` 초과 |
+| HTTP failed | `0.00%` |
+| 5xx | `0` |
+| Checks | `3,035,729 / 3,035,729` passed |
+| Created orders | `28,779` |
+| Created trades | `14,389` |
+| Actual order throughput | `87.55 order/s` |
+| Dropped iterations | `1,222` |
+| WebSocket connections | `50` |
+| Trade messages | `719,450` |
+| OrderBook messages | `25,000` |
+| Trade delivery lag p95 / p99 / max | `1.02s` / `1.25s` / `1.73s` |
+| Order create p95 / p99 / max | `1.91s` / `2.16s` / `3.17s` |
+| HTTP request p95 / p99 / max | `1.91s` / `2.15s` / `3.17s` |
+| Kafka consumer lag | `0` |
+| Hikari active max over 1h | `20` |
+| Hikari pending max over 1h | `139` |
+| JVM GC pause max over 1h | `11ms` |
+
+Order create stage max:
+
+| stage | max |
+|---|---:|
+| `total` | `2.7544s` |
+| `transaction_template` | `1.9470s` |
+| `transaction_begin` | `1.7400s` |
+| `transaction_callback` | `381.10ms` |
+| `market_lock_wait` | `377.54ms` |
+| `market_lock_hold` | `53.15ms` |
+| `settlement` | `32.87ms` |
+| `transaction_after_callback` | `25.64ms` |
+| `transaction_commit` | `25.36ms` |
+| `settlement_wallet_lock` | `19.66ms` |
+| `order_lock_ledger_save` | `15.69ms` |
+| `client_order_id_check` | `13.95ms` |
+| `settlement_completed_event_save` | `12.22ms` |
+| `settlement_ledger_save` | `11.37ms` |
+| `taker_wallet_lock` | `10.81ms` |
+| `settlement_trade_event_save` | `10.84ms` |
+| `order_save` | `9.62ms` |
+| `order_accepted_event_save` | `8.07ms` |
+| `maker_order_lock` | `7.97ms` |
+| `sequence_lock` | `7.10ms` |
+| `trade_save` | `6.54ms` |
+| `settlement_wallet_mutation` | `0.03ms` |
+| `settlement_order_fill` | `0.03ms` |
+| `orderbook_after_commit` | `0.07ms` |
+
+Finding:
+
+- `transaction_template max 1.9470s` 중 `transaction_begin max 1.7400s`가 가장 큰 비중을 차지한다.
+- `transaction_callback max 381.10ms`는 대부분 `market_lock_wait max 377.54ms`와 같은 수준으로 관측됐다.
+- 새로 분리한 DB write 구간은 `settlement_ledger_save 11.37ms`, `settlement_trade_event_save 10.84ms`, `trade_save 6.54ms`, `order_accepted_event_save 8.07ms` 수준이다.
+- 체결 계산과 wallet entity mutation은 각각 `0.03ms` 수준으로 병목 후보에서 제외한다.
+- Kafka consumer lag, 5xx, WebSocket/STOMP error는 0으로 유지됐다.
+- Hikari pending max는 `139`로 남아 있어 connection 대기 압력은 유지된다.
+
+Decision:
+
+- `transaction_callback` 내부 DB write 자체는 현재 주문 생성 p95 지연의 주 병목이 아니다.
+- 잔여 병목은 `transaction_begin` 대기와 callback 내부 `market_lock_wait`로 분리한다.
+- 다음 개선은 settlement write 최적화보다 주문 생성 트랜잭션 진입 대기와 market lock 대기 완화에 우선순위를 둔다.
+
+## 21. 발견 이슈
 
 | ID | Severity | Symptom | Suspected cause | Action |
 |---|---|---|---|---|
@@ -1124,6 +1224,7 @@ Decision:
 | ORD-002 | MAJOR | `50 subscribers / 100 order/s / 5m`에서 order create p95 `2.63s`, dropped iteration `4,582` 발생 | `transaction_template max 3.7715s`, Hikari pending 상승 | 주문 생성 transaction scope 및 DB connection 점유 시간 축소 |
 | ORD-003 | MAJOR | transaction phase 계측 후 order create p95 `2.14s`, Hikari pending max `149` 발생 | `transaction_begin max 2.2790s`; DB connection 획득/transaction begin 대기 | `#61`에서 pool size `10 / 20 / 30` 단계별 측정 |
 | ORD-004 | MAJOR | pool size `30`에서 order create p95 `2.11s`, dropped iteration `2,133`으로 악화 | 과도한 DB connection 동시성으로 transaction callback, market lock 경합 증가 | transaction callback 내부 DB lock/market lock 경합 완화 |
+| ORD-005 | MAJOR | pool size `20`에서 order create p95 `1.91s`, dropped iteration `1,222` 유지 | `transaction_begin max 1.7400s`, `market_lock_wait max 377.54ms`; 내부 DB write stage는 수십 ms 이하 | transaction begin 대기와 market lock wait 분리 개선 |
 
 Severity:
 
@@ -1131,7 +1232,7 @@ Severity:
 - `MAJOR`: 5xx, lock timeout, 반복 가능한 성능 병목
 - `MINOR`: 문서/로그/테스트 안정성 개선
 
-## 21. 후속 조치
+## 22. 후속 조치
 
 | Action | Owner | Status | Link |
 |---|---|---|---|
@@ -1150,4 +1251,5 @@ Severity:
 | Reduce market lock wait contention |  | DONE |  |
 | Measure order transaction lifecycle bottleneck |  | DONE |  |
 | Tune order DB connection pool capacity |  | DONE |  |
+| Measure transaction callback internal DB contention |  | DONE |  |
 | Reduce order transaction hold time |  | TODO |  |
