@@ -73,13 +73,19 @@ public class OrderSettlementService {
             boolean takerIsBuy = taker.getSide() == OrderSide.BUY;
             Order buyOrder = takerIsBuy ? taker : maker;
 
-            BigDecimal oldBuyLocked = buyOrder.getLockedAmount();
+            SettlementAmounts amounts = stageRecorder.record(
+                    market.getSymbol(), taker.getSide(), "settlement_order_fill",
+                    () -> {
+                        BigDecimal oldBuyLocked = buyOrder.getLockedAmount();
 
-            maker.fill(result.quantity(), result.quoteAmount(), market.getAmountScale());
-            taker.fill(result.quantity(), result.quoteAmount(), market.getAmountScale());
+                        maker.fill(result.quantity(), result.quoteAmount(), market.getAmountScale());
+                        taker.fill(result.quantity(), result.quoteAmount(), market.getAmountScale());
 
-            BigDecimal buyerReleased = oldBuyLocked.subtract(buyOrder.getLockedAmount());
-            BigDecimal buyerRefund = buyerReleased.subtract(result.quoteAmount());
+                        BigDecimal buyerReleased = oldBuyLocked.subtract(buyOrder.getLockedAmount());
+                        BigDecimal buyerRefund = buyerReleased.subtract(result.quoteAmount());
+                        return new SettlementAmounts(buyerReleased, buyerRefund);
+                    }
+            );
 
             WalletKey buyerBaseKey = new WalletKey(result.buyUserId(), market.getBaseAsset());
             WalletKey sellerQuoteKey = new WalletKey(result.sellUserId(), market.getQuoteAsset());
@@ -99,13 +105,16 @@ public class OrderSettlementService {
             Wallet sellerBaseWallet = wallets.get(sellerBaseKey);
             Wallet buyerQuoteWallet = wallets.get(buyerQuoteKey);
 
-            buyerQuoteWallet.consumeLocked(buyerReleased);
-            if (buyerRefund.compareTo(BigDecimal.ZERO) > 0) {
-                buyerQuoteWallet.deposit(buyerRefund);
-            }
-            buyerBaseWallet.deposit(result.quantity());
-            sellerBaseWallet.consumeLocked(result.quantity());
-            sellerQuoteWallet.deposit(result.quoteAmount());
+            stageRecorder.record(market.getSymbol(), taker.getSide(), "settlement_wallet_mutation", () -> {
+                buyerQuoteWallet.consumeLocked(amounts.buyerReleased());
+                if (amounts.buyerRefund().compareTo(BigDecimal.ZERO) > 0) {
+                    buyerQuoteWallet.deposit(amounts.buyerRefund());
+                }
+                buyerBaseWallet.deposit(result.quantity());
+                sellerBaseWallet.consumeLocked(result.quantity());
+                sellerQuoteWallet.deposit(result.quoteAmount());
+                return null;
+            });
 
             Trade trade = Trade.create(
                     market.getId(), market.getSymbol(),
@@ -114,57 +123,70 @@ public class OrderSettlementService {
                     result.buyUserId(), result.sellUserId(),
                     result.price(), result.quantity(), result.quoteAmount()
             );
-            tradeRepository.save(trade);
+            stageRecorder.record(market.getSymbol(), taker.getSide(), "trade_save",
+                    () -> tradeRepository.save(trade));
 
             Long buyOrderId = result.buyOrderId();
             Long sellOrderId = result.sellOrderId();
             Long tradeId = trade.getId();
 
-            eventRecorder.recordOrderFillEvent(maker, tradeId);
-            eventRecorder.recordOrderFillEvent(taker, tradeId);
-            eventRecorder.recordTradeCreated(trade);
+            stageRecorder.record(market.getSymbol(), taker.getSide(), "settlement_trade_event_save", () -> {
+                eventRecorder.recordOrderFillEvent(maker, tradeId);
+                eventRecorder.recordOrderFillEvent(taker, tradeId);
+                eventRecorder.recordTradeCreated(trade);
+                return null;
+            });
 
-            walletLedgerRepository.save(WalletLedger.create(
-                    buyerQuoteWallet, LedgerType.TRADE_BUY_QUOTE_SETTLE,
-                    buyerRefund, buyerReleased.negate(),
-                    buyOrderId, tradeId
-            ));
-            walletLedgerRepository.save(WalletLedger.create(
-                    buyerBaseWallet, LedgerType.TRADE_BUY_BASE_CREDIT,
-                    result.quantity(), BigDecimal.ZERO,
-                    buyOrderId, tradeId
-            ));
-            walletLedgerRepository.save(WalletLedger.create(
-                    sellerBaseWallet, LedgerType.TRADE_SELL_BASE_SETTLE,
-                    BigDecimal.ZERO, result.quantity().negate(),
-                    sellOrderId, tradeId
-            ));
-            walletLedgerRepository.save(WalletLedger.create(
-                    sellerQuoteWallet, LedgerType.TRADE_SELL_QUOTE_CREDIT,
-                    result.quoteAmount(), BigDecimal.ZERO,
-                    sellOrderId, tradeId
-            ));
+            stageRecorder.record(market.getSymbol(), taker.getSide(), "settlement_ledger_save", () -> {
+                walletLedgerRepository.save(WalletLedger.create(
+                        buyerQuoteWallet, LedgerType.TRADE_BUY_QUOTE_SETTLE,
+                        amounts.buyerRefund(), amounts.buyerReleased().negate(),
+                        buyOrderId, tradeId
+                ));
+                walletLedgerRepository.save(WalletLedger.create(
+                        buyerBaseWallet, LedgerType.TRADE_BUY_BASE_CREDIT,
+                        result.quantity(), BigDecimal.ZERO,
+                        buyOrderId, tradeId
+                ));
+                walletLedgerRepository.save(WalletLedger.create(
+                        sellerBaseWallet, LedgerType.TRADE_SELL_BASE_SETTLE,
+                        BigDecimal.ZERO, result.quantity().negate(),
+                        sellOrderId, tradeId
+                ));
+                walletLedgerRepository.save(WalletLedger.create(
+                        sellerQuoteWallet, LedgerType.TRADE_SELL_QUOTE_CREDIT,
+                        result.quoteAmount(), BigDecimal.ZERO,
+                        sellOrderId, tradeId
+                ));
+                return null;
+            });
 
             if (maker.getRemainingQuantity().signum() > 0) {
-                BigDecimal dustCheck = maker.getPrice()
-                        .multiply(maker.getRemainingQuantity())
-                        .setScale(market.getAmountScale(), RoundingMode.DOWN);
-                if (dustCheck.signum() == 0) {
-                    Wallet makerLockedWallet = takerIsBuy ? sellerBaseWallet : buyerQuoteWallet;
-                    BigDecimal dustRelease = maker.releasableAmount();
-                    makerLockedWallet.unlock(dustRelease);
-                    maker.cancel();
-                    autoCanceledMakers.add(maker);
-                    walletLedgerRepository.save(WalletLedger.create(
-                            makerLockedWallet, LedgerType.ORDER_CANCEL_RELEASE,
-                            dustRelease, dustRelease.negate(),
-                            maker.getId(), tradeId
-                    ));
-                    eventRecorder.recordOrderCanceled(maker, maker.getLockedAsset(), dustRelease.toPlainString());
-                }
+                stageRecorder.record(market.getSymbol(), taker.getSide(), "settlement_dust_cancel", () -> {
+                    BigDecimal dustCheck = maker.getPrice()
+                            .multiply(maker.getRemainingQuantity())
+                            .setScale(market.getAmountScale(), RoundingMode.DOWN);
+                    if (dustCheck.signum() == 0) {
+                        Wallet makerLockedWallet = takerIsBuy ? sellerBaseWallet : buyerQuoteWallet;
+                        BigDecimal dustRelease = maker.releasableAmount();
+                        makerLockedWallet.unlock(dustRelease);
+                        maker.cancel();
+                        autoCanceledMakers.add(maker);
+                        walletLedgerRepository.save(WalletLedger.create(
+                                makerLockedWallet, LedgerType.ORDER_CANCEL_RELEASE,
+                                dustRelease, dustRelease.negate(),
+                                maker.getId(), tradeId
+                        ));
+                        eventRecorder.recordOrderCanceled(maker, maker.getLockedAsset(), dustRelease.toPlainString());
+                    }
+                    return null;
+                });
             }
 
-            eventRecorder.recordSettlementCompleted(trade);
+            stageRecorder.record(market.getSymbol(), taker.getSide(), "settlement_completed_event_save", () -> {
+                eventRecorder.recordSettlementCompleted(trade);
+                return null;
+            });
             trades.add(trade);
         }
 
@@ -196,5 +218,8 @@ public class OrderSettlementService {
             if (userCompare != 0) return userCompare;
             return this.asset.compareTo(other.asset);
         }
+    }
+
+    private record SettlementAmounts(BigDecimal buyerReleased, BigDecimal buyerRefund) {
     }
 }

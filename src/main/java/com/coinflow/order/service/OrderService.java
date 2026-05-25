@@ -150,7 +150,10 @@ public class OrderService {
                     );
                     stageRecorder.record(market.getSymbol(), side, "order_save",
                             () -> orderRepository.save(order));
-                    eventRecorder.recordOrderAccepted(order);
+                    stageRecorder.record(market.getSymbol(), side, "order_accepted_event_save", () -> {
+                        eventRecorder.recordOrderAccepted(order);
+                        return null;
+                    });
 
                     orderAssetLockService.recordOrderLockLedger(wallet, order, command);
 
