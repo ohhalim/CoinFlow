@@ -982,14 +982,27 @@ Stage 기준:
 | `market_lock_wait` | market별 순서 보장 lock 획득 대기 시간 |
 | `market_lock_hold` | market lock을 보유한 전체 시간 |
 | `transaction_template` | 주문 생성 DB 트랜잭션 실행 시간 |
+| `transaction_begin` | transaction callback 진입 전 대기 시간 |
+| `transaction_callback` | transaction callback 내부 실행 시간 |
+| `transaction_commit` | Spring transaction commit 구간 |
 | `client_order_id_check` | client order id 중복 검증 시간 |
 | `self_trade_check` | 자전거래 방지 검증 시간 |
 | `sequence_lock` | market sequence 잠금 및 증가 시간 |
 | `taker_wallet_lock` | taker wallet 잠금 시간 |
 | `maker_order_lock` | maker order pessimistic lock 시간 |
 | `settlement_wallet_lock` | 체결 정산 대상 wallet lock 시간 |
+| `order_save` | 주문 저장 시간 |
+| `order_accepted_event_save` | 주문 접수 domain event 저장 시간 |
+| `order_lock_ledger_save` | 주문 잠금 ledger 저장 시간 |
 | `matching_plan` | 인메모리 orderbook 매칭 계획 생성 시간 |
 | `settlement` | 체결 저장, 주문 상태 변경, 지갑 정산 시간 |
+| `settlement_order_fill` | maker/taker 주문 체결 수량과 잠금 금액 계산 시간 |
+| `settlement_wallet_mutation` | buyer/seller wallet 잔액 변경 시간 |
+| `trade_save` | trade 저장 시간 |
+| `settlement_trade_event_save` | 체결 관련 domain event 저장 시간 |
+| `settlement_ledger_save` | 체결 정산 ledger 저장 시간 |
+| `settlement_dust_cancel` | dust 주문 자동 취소 및 해제 기록 시간 |
+| `settlement_completed_event_save` | 정산 완료 domain event 저장 시간 |
 | `orderbook_after_commit` | DB commit 이후 orderbook 반영 시간 |
 | `total` | 주문 생성 요청 전체 처리 시간 |
 
@@ -998,6 +1011,7 @@ Stage 기준:
 | subscribers | order rate | duration | 목적 |
 |---:|---:|---:|---|
 | 50 | 100/s | 30s | #51 개선 이후 남은 주문 생성 병목 구간 확인 |
+| 50 | 100/s | 5m | #64 transaction callback 내부 DB lock/write 병목 위치 확인 |
 
 Grafana 확인 항목:
 
@@ -1017,7 +1031,12 @@ Bottleneck 판단 기준:
 | `market_lock_wait` 증가 | 동일 market 주문 직렬화 경합 |
 | `market_lock_hold` 증가 | lock 내부 작업량 증가 또는 후속 단계 병목 |
 | `transaction_template` 증가 | DB 트랜잭션 전체 병목 |
+| `transaction_begin` 증가 | Hikari connection 획득 또는 transaction begin 대기 |
+| `transaction_callback` 증가 | 트랜잭션 내부 비즈니스/DB 작업 병목 |
 | `taker_wallet_lock`, `maker_order_lock`, `settlement_wallet_lock` 증가 | DB row lock 경합 |
+| `order_save`, `trade_save`, `settlement_ledger_save` 증가 | DB write 또는 flush 경합 |
+| `settlement_trade_event_save`, `settlement_completed_event_save` 증가 | outbox/domain event 저장 병목 |
+| `settlement_order_fill`, `settlement_wallet_mutation` 증가 | JVM 계산 또는 엔티티 상태 변경 비용 |
 | `matching_plan` 증가 | 인메모리 orderbook 매칭 비용 |
 | `settlement` 증가 | trade/order/wallet/ledger 저장 및 정산 병목 |
 | `orderbook_after_commit` 증가 | commit 이후 orderbook 반영 비용 |
