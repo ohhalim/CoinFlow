@@ -37,6 +37,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
 
 @Slf4j
@@ -98,132 +99,132 @@ public class OrderService {
         CreateOrderCommand command = orderCreateValidator.validate(market, request);
         OrderSide side = command.side();
 
+        MarketLockScope marketLockScope = acquireMarketLock(market, side);
+        AtomicBoolean releaseRegistered = new AtomicBoolean(false);
+
         long transactionTemplateStartedAt = System.nanoTime();
         TransactionLifecycleMetrics transactionMetrics = new TransactionLifecycleMetrics(
                 market.getSymbol(), side, transactionTemplateStartedAt);
         try {
-            return transactionTemplate.execute(status -> {
-                transactionMetrics.recordCallbackStarted();
-                long transactionCallbackStartedAt = System.nanoTime();
-                MarketLockScope marketLockScope = null;
-                boolean releaseRegistered = false;
-                try {
-                    // clientOrderId 중복 검증
-                    if (request.clientOrderId() != null) {
-                        boolean duplicatedClientOrderId = stageRecorder.record(
-                                market.getSymbol(), side, "client_order_id_check",
-                                () -> orderRepository.existsByUserIdAndClientOrderId(currentUserId, request.clientOrderId())
-                        );
-                        if (duplicatedClientOrderId) {
-                            throw new ApiException(ErrorCode.DUPLICATE_CLIENT_ORDER_ID);
-                        }
-                    }
-
-                    marketLockScope = acquireMarketLock(market, side);
-
-                    // self-trade 사전 검증 (MAT-006)
-                    boolean hasSelfTrade = stageRecorder.record(
-                            market.getSymbol(), side, "self_trade_check",
-                            () -> matchingEngine.hasSelfTrade(market.getSymbol(), side, command.price(), currentUserId)
-                    );
-                    if (hasSelfTrade) {
-                        throw new ApiException(ErrorCode.SELF_TRADE_NOT_ALLOWED);
-                    }
-
-                    // sequence 발급
-                    OrderSequence seq = stageRecorder.record(
-                            market.getSymbol(), side, "sequence_lock",
-                            () -> orderSequenceRepository.findByMarketIdWithLock(market.getId())
-                                    .orElseThrow(() -> new ApiException(ErrorCode.MARKET_NOT_FOUND))
-                    );
-                    Long sequence = seq.nextSequence();
-
-                    Wallet wallet = orderAssetLockService.lockTakerWallet(currentUserId, command);
-
-                    // order 저장
-                    Order order = Order.create(
-                            currentUserId, market.getId(), market.getSymbol(),
-                            side, command.type(), command.timeInForce(),
-                            command.price(), command.quantity(),
-                            command.lockedAsset(), command.lockedAmount(),
-                            sequence, request.clientOrderId()
-                    );
-                    stageRecorder.record(market.getSymbol(), side, "order_save",
-                            () -> orderRepository.save(order));
-                    stageRecorder.record(market.getSymbol(), side, "order_accepted_event_save", () -> {
-                        eventRecorder.recordOrderAccepted(order);
-                        return null;
-                    });
-
-                    orderAssetLockService.recordOrderLockLedger(wallet, order, command);
-
-                    // 매칭 계획 수립 (큐 미변경), 정산
-                    List<MatchResult> plan = stageRecorder.record(
-                            market.getSymbol(), side, "matching_plan",
-                            () -> matchingEngine.planMatch(market, order)
-                    );
-                    List<Order> autoCanceledMakers = new ArrayList<>();
-                    List<Trade> trades = stageRecorder.record(
-                            market.getSymbol(), side, "settlement",
-                            () -> orderSettlementService.settle(market, order, plan, autoCanceledMakers)
-                    );
-
-                    // 커밋 성공 후 오더북 반영 — DB 롤백 시 큐는 그대로
-                    MarketLockScope finalMarketLockScope = marketLockScope;
-                    TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                        @Override
-                        public void beforeCommit(boolean readOnly) {
-                            transactionMetrics.recordBeforeCommit();
-                        }
-
-                        @Override
-                        public void beforeCompletion() {
-                            transactionMetrics.recordBeforeCompletion();
-                        }
-
-                        @Override
-                        public void afterCommit() {
-                            transactionMetrics.recordAfterCommitStarted();
-                            long orderBookApplyStartedAt = System.nanoTime();
-                            try {
-                                matchingEngine.applyMatchPlan(market, order, plan);
-                                autoCanceledMakers.forEach(canceledMaker ->
-                                        matchingEngine.cancelOrder(market.getSymbol(), canceledMaker));
-                            } catch (Exception e) {
-                                log.error("오더북 applyMatchPlan 실패: orderId={}, DB 체결 내역 기반 재빌드 시도", order.getId(), e);
-                                orderBookRecoveryService.rebuildAfterApplyFailure(market.getId());
-                            } finally {
-                                stageRecorder.record(market.getSymbol(), side, "orderbook_after_commit",
-                                        System.nanoTime() - orderBookApplyStartedAt);
-                                transactionMetrics.recordAfterCommitFinished();
+            try {
+                return transactionTemplate.execute(status -> {
+                    transactionMetrics.recordCallbackStarted();
+                    long transactionCallbackStartedAt = System.nanoTime();
+                    try {
+                        // clientOrderId 중복 검증
+                        if (request.clientOrderId() != null) {
+                            boolean duplicatedClientOrderId = stageRecorder.record(
+                                    market.getSymbol(), side, "client_order_id_check",
+                                    () -> orderRepository.existsByUserIdAndClientOrderId(currentUserId, request.clientOrderId())
+                            );
+                            if (duplicatedClientOrderId) {
+                                throw new ApiException(ErrorCode.DUPLICATE_CLIENT_ORDER_ID);
                             }
                         }
 
-                        @Override
-                        public void afterCompletion(int status) {
-                            transactionMetrics.recordAfterCompletionStarted();
-                            finalMarketLockScope.release();
-                            transactionMetrics.recordAfterCompletionFinished();
+                        // self-trade 사전 검증 (MAT-006)
+                        boolean hasSelfTrade = stageRecorder.record(
+                                market.getSymbol(), side, "self_trade_check",
+                                () -> matchingEngine.hasSelfTrade(market.getSymbol(), side, command.price(), currentUserId)
+                        );
+                        if (hasSelfTrade) {
+                            throw new ApiException(ErrorCode.SELF_TRADE_NOT_ALLOWED);
                         }
-                    });
-                    releaseRegistered = true;
 
-                    return CreateOrderResponse.of(order, trades);
-                } finally {
-                    transactionMetrics.recordCallbackFinished();
-                    stageRecorder.record(market.getSymbol(), side, "transaction_callback",
-                            System.nanoTime() - transactionCallbackStartedAt);
-                    if (marketLockScope != null && !releaseRegistered) {
-                        marketLockScope.release();
+                        // sequence 발급
+                        OrderSequence seq = stageRecorder.record(
+                                market.getSymbol(), side, "sequence_lock",
+                                () -> orderSequenceRepository.findByMarketIdWithLock(market.getId())
+                                        .orElseThrow(() -> new ApiException(ErrorCode.MARKET_NOT_FOUND))
+                        );
+                        Long sequence = seq.nextSequence();
+
+                        Wallet wallet = orderAssetLockService.lockTakerWallet(currentUserId, command);
+
+                        // order 저장
+                        Order order = Order.create(
+                                currentUserId, market.getId(), market.getSymbol(),
+                                side, command.type(), command.timeInForce(),
+                                command.price(), command.quantity(),
+                                command.lockedAsset(), command.lockedAmount(),
+                                sequence, request.clientOrderId()
+                        );
+                        stageRecorder.record(market.getSymbol(), side, "order_save",
+                                () -> orderRepository.save(order));
+                        stageRecorder.record(market.getSymbol(), side, "order_accepted_event_save", () -> {
+                            eventRecorder.recordOrderAccepted(order);
+                            return null;
+                        });
+
+                        orderAssetLockService.recordOrderLockLedger(wallet, order, command);
+
+                        // 매칭 계획 수립 (큐 미변경), 정산
+                        List<MatchResult> plan = stageRecorder.record(
+                                market.getSymbol(), side, "matching_plan",
+                                () -> matchingEngine.planMatch(market, order)
+                        );
+                        List<Order> autoCanceledMakers = new ArrayList<>();
+                        List<Trade> trades = stageRecorder.record(
+                                market.getSymbol(), side, "settlement",
+                                () -> orderSettlementService.settle(market, order, plan, autoCanceledMakers)
+                        );
+
+                        // 커밋 성공 후 오더북 반영 — DB 롤백 시 큐는 그대로
+                        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                            @Override
+                            public void beforeCommit(boolean readOnly) {
+                                transactionMetrics.recordBeforeCommit();
+                            }
+
+                            @Override
+                            public void beforeCompletion() {
+                                transactionMetrics.recordBeforeCompletion();
+                            }
+
+                            @Override
+                            public void afterCommit() {
+                                transactionMetrics.recordAfterCommitStarted();
+                                long orderBookApplyStartedAt = System.nanoTime();
+                                try {
+                                    matchingEngine.applyMatchPlan(market, order, plan);
+                                    autoCanceledMakers.forEach(canceledMaker ->
+                                            matchingEngine.cancelOrder(market.getSymbol(), canceledMaker));
+                                } catch (Exception e) {
+                                    log.error("오더북 applyMatchPlan 실패: orderId={}, DB 체결 내역 기반 재빌드 시도", order.getId(), e);
+                                    orderBookRecoveryService.rebuildAfterApplyFailure(market.getId());
+                                } finally {
+                                    stageRecorder.record(market.getSymbol(), side, "orderbook_after_commit",
+                                            System.nanoTime() - orderBookApplyStartedAt);
+                                    transactionMetrics.recordAfterCommitFinished();
+                                }
+                            }
+
+                            @Override
+                            public void afterCompletion(int status) {
+                                transactionMetrics.recordAfterCompletionStarted();
+                                marketLockScope.release();
+                                transactionMetrics.recordAfterCompletionFinished();
+                            }
+                        });
+                        releaseRegistered.set(true);
+
+                        return CreateOrderResponse.of(order, trades);
+                    } finally {
+                        transactionMetrics.recordCallbackFinished();
+                        stageRecorder.record(market.getSymbol(), side, "transaction_callback",
+                                System.nanoTime() - transactionCallbackStartedAt);
                     }
+                });
+            } catch (DataIntegrityViolationException e) {
+                if (request.clientOrderId() != null && isDuplicateClientOrderId(e)) {
+                    throw new ApiException(ErrorCode.DUPLICATE_CLIENT_ORDER_ID);
                 }
-            });
-        } catch (DataIntegrityViolationException e) {
-            if (request.clientOrderId() != null && isDuplicateClientOrderId(e)) {
-                throw new ApiException(ErrorCode.DUPLICATE_CLIENT_ORDER_ID);
+                throw e;
             }
-            throw e;
         } finally {
+            if (!releaseRegistered.get()) {
+                marketLockScope.release();
+            }
             long transactionTemplateFinishedAt = System.nanoTime();
             stageRecorder.record(market.getSymbol(), side, "transaction_template",
                     transactionTemplateFinishedAt - transactionTemplateStartedAt);
