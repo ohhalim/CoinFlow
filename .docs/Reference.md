@@ -24,6 +24,7 @@ CoinFlow MVP는 거래소의 모든 기능을 구현하는 프로젝트가 아�
 | `TestPlan.md` | 통합 테스트 시나리오와 불변식 |
 | `Plan.md` | 구현 순서와 phase별 완료 기준 |
 | `Reference.md` | 설계 의도 설명과 외부 참고 자료 |
+| `PHASE2_LOAD_REFERENCE.md` | Outbox/Kafka/WebSocket 부하 측정 단계의 추가 레퍼런스 |
 | `ERDCloud.sql` | ERD Cloud import용 단순 DDL |
 
 ---
