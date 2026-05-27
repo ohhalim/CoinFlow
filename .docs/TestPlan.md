@@ -1000,6 +1000,7 @@ Stage 기준:
 | `settlement_wallet_mutation` | buyer/seller wallet 잔액 변경 시간 |
 | `trade_save` | trade 저장 시간 |
 | `settlement_trade_event_save` | 체결 관련 domain event 저장 시간 |
+| `settlement_events_save` | 체결 관련 domain event batch 저장 시간 |
 | `settlement_ledger_save` | 체결 정산 ledger 저장 시간 |
 | `settlement_dust_cancel` | dust 주문 자동 취소 및 해제 기록 시간 |
 | `settlement_completed_event_save` | 정산 완료 domain event 저장 시간 |
@@ -1035,7 +1036,7 @@ Bottleneck 판단 기준:
 | `transaction_callback` 증가 | 트랜잭션 내부 비즈니스/DB 작업 병목 |
 | `taker_wallet_lock`, `maker_order_lock`, `settlement_wallet_lock` 증가 | DB row lock 경합 |
 | `order_save`, `trade_save`, `settlement_ledger_save` 증가 | DB write 또는 flush 경합 |
-| `settlement_trade_event_save`, `settlement_completed_event_save` 증가 | outbox/domain event 저장 병목 |
+| `settlement_trade_event_save`, `settlement_completed_event_save`, `settlement_events_save` 증가 | outbox/domain event 저장 병목 |
 | `settlement_order_fill`, `settlement_wallet_mutation` 증가 | JVM 계산 또는 엔티티 상태 변경 비용 |
 | `matching_plan` 증가 | 인메모리 orderbook 매칭 비용 |
 | `settlement` 증가 | trade/order/wallet/ledger 저장 및 정산 병목 |
