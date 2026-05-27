@@ -1098,7 +1098,70 @@ MySQL 수집 항목:
 - 수집 로그는 `/private/tmp/coinflow-mysql-lock-wait/{RUN_ID}`에 저장한다.
 - PR에는 raw log 전체를 포함하지 않고 요약 표와 필요한 캡처만 포함한다.
 
-## 15. Invariants
+## 15. Single Market Throughput Limit
+
+market lock을 DB transaction 시작 전으로 이동한 뒤 Hikari pending은 제거됐지만, order create p95와 dropped iteration은 유지됐다. 현재 구조에서 단일 market 주문 직렬화가 어느 order rate부터 포화되는지 단계별로 측정한다.
+
+공통 조건:
+
+| 항목 | 값 |
+|---|---:|
+| WebSocket subscribers | `50` |
+| Duration | `5m` |
+| Hikari pool size | `20` |
+| Order VUs / Max VUs | `40` / `160` |
+| Buyer / Seller count | `40` / `40` |
+
+측정 matrix:
+
+| Step | ORDER_RATE | 목적 |
+|---:|---:|---|
+| 1 | `50/s` | 안정 구간 기준선 확인 |
+| 2 | `70/s` | 현재 관측 처리량 근처의 임계 구간 확인 |
+| 3 | `90/s` | saturation 진입 여부 확인 |
+| 4 | `100/s` | 기존 병목 재현 및 비교 |
+
+실행 명령:
+
+```bash
+WS_SUBSCRIBERS=50 ORDER_RATE=50 DURATION=5m DB_POOL_MAX_SIZE=20 ORDER_VUS=40 ORDER_MAX_VUS=160 BUYER_COUNT=40 SELLER_COUNT=40 k6 run k6/websocket-kafka-load-test.js
+WS_SUBSCRIBERS=50 ORDER_RATE=70 DURATION=5m DB_POOL_MAX_SIZE=20 ORDER_VUS=40 ORDER_MAX_VUS=160 BUYER_COUNT=40 SELLER_COUNT=40 k6 run k6/websocket-kafka-load-test.js
+WS_SUBSCRIBERS=50 ORDER_RATE=90 DURATION=5m DB_POOL_MAX_SIZE=20 ORDER_VUS=40 ORDER_MAX_VUS=160 BUYER_COUNT=40 SELLER_COUNT=40 k6 run k6/websocket-kafka-load-test.js
+WS_SUBSCRIBERS=50 ORDER_RATE=100 DURATION=5m DB_POOL_MAX_SIZE=20 ORDER_VUS=40 ORDER_MAX_VUS=160 BUYER_COUNT=40 SELLER_COUNT=40 k6 run k6/websocket-kafka-load-test.js
+```
+
+기록 항목:
+
+| 항목 | 목적 |
+|---|---|
+| `created_orders` | 실제 처리량 산정 |
+| `dropped_iterations` | 목표 rate 미달 여부 확인 |
+| `order_create_duration p95 / p99 / max` | 사용자 응답 지연 임계점 확인 |
+| `market_lock_wait max` | 단일 market 직렬화 대기 확인 |
+| `market_lock_hold max` | lock 내부 점유 시간 확인 |
+| `transaction_begin max` | DB connection 대기 재발 여부 확인 |
+| `Hikari active / pending` | connection pool 압력 확인 |
+| `Kafka consumer lag` | 실시간 전파 적체 여부 확인 |
+| `WebSocket/STOMP error` | subscriber 전파 오류 여부 확인 |
+| `HTTP failed / 5xx` | 서버 오류 여부 확인 |
+
+판단 기준:
+
+| 결과 | 판단 |
+|---|---|
+| p95 `1s` 이하, dropped `0` 근접 | 안정 처리 구간 |
+| p95 `1s` 초과, dropped 증가 | saturation 진입 |
+| Hikari pending `0`, market_lock_wait 증가 | DB connection이 아닌 market 직렬화 병목 |
+| Kafka lag 또는 WebSocket error 증가 | 주문 생성이 아닌 전파 구간 병목 |
+| 5xx 또는 order failure 발생 | 안정성 한계 |
+
+결과 기록:
+
+- `.docs/TEST_RESULTS.md`에 rate별 결과 표를 추가한다.
+- Grafana 캡처는 rate별 전체를 모두 저장하지 않고, 안정 구간 1개와 포화 구간 1개만 저장한다.
+- 다음 개선 방향은 측정 결과에 따라 market lock 분할, 매칭/정산 직렬화 범위 축소, 또는 구조 유지로 결정한다.
+
+## 16. Invariants
 
 모든 통합 테스트 후 아래 불변식을 검증한다.
 
