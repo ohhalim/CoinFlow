@@ -38,14 +38,7 @@ public class DomainEventRecorder {
     public void recordOrderAccepted(Order order) {
         insert(DomainEventType.ORDER_ACCEPTED, "ORDER", order.getId(),
                 order.getMarketId(), order.getMarketSymbol(),
-                Map.of(
-                        "orderId", order.getId(),
-                        "userId", order.getUserId(),
-                        "market", order.getMarketSymbol(),
-                        "side", order.getSide().name(),
-                        "price", order.getPrice(),
-                        "quantity", order.getOriginalQuantity()
-                ));
+                orderAcceptedPayload(order));
     }
 
     public void recordOrderFillEvent(Order order, Long tradeId) {
@@ -124,10 +117,44 @@ public class DomainEventRecorder {
         ));
     }
 
+    public void recordOrderAcceptedAndSettlementEvents(Order acceptedOrder, Order maker, Order taker, Trade trade) {
+        DomainEventType makerFillType = fillEventType(maker);
+        DomainEventType takerFillType = fillEventType(taker);
+
+        insertAll(List.of(
+                createEvent(DomainEventType.ORDER_ACCEPTED, "ORDER", acceptedOrder.getId(),
+                        acceptedOrder.getMarketId(), acceptedOrder.getMarketSymbol(),
+                        orderAcceptedPayload(acceptedOrder)),
+                createEvent(makerFillType, "ORDER", maker.getId(),
+                        maker.getMarketId(), maker.getMarketSymbol(),
+                        orderFillPayload(maker, trade.getId())),
+                createEvent(takerFillType, "ORDER", taker.getId(),
+                        taker.getMarketId(), taker.getMarketSymbol(),
+                        orderFillPayload(taker, trade.getId())),
+                createEvent(DomainEventType.TRADE_CREATED, "TRADE", trade.getId(),
+                        trade.getMarketId(), trade.getMarketSymbol(),
+                        tradeCreatedPayload(trade)),
+                createEvent(DomainEventType.SETTLEMENT_COMPLETED, "TRADE", trade.getId(),
+                        trade.getMarketId(), trade.getMarketSymbol(),
+                        settlementCompletedPayload(trade))
+        ));
+    }
+
     private DomainEventType fillEventType(Order order) {
         return order.getRemainingQuantity().signum() == 0
                 ? DomainEventType.ORDER_FILLED
                 : DomainEventType.ORDER_PARTIALLY_FILLED;
+    }
+
+    private Map<String, Object> orderAcceptedPayload(Order order) {
+        return Map.of(
+                "orderId", order.getId(),
+                "userId", order.getUserId(),
+                "market", order.getMarketSymbol(),
+                "side", order.getSide().name(),
+                "price", order.getPrice(),
+                "quantity", order.getOriginalQuantity()
+        );
     }
 
     private Map<String, Object> orderFillPayload(Order order, Long tradeId) {

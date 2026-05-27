@@ -141,12 +141,8 @@ public class OrderService {
                         );
                         stageRecorder.record(market.getSymbol(), side, "order_save",
                                 () -> orderRepository.save(order));
-                        stageRecorder.record(market.getSymbol(), side, "order_accepted_event_save", () -> {
-                            eventRecorder.recordOrderAccepted(order);
-                            return null;
-                        });
 
-                        orderAssetLockService.recordOrderLockLedger(wallet, order, command);
+                        WalletLedger orderLockLedger = orderAssetLockService.createOrderLockLedger(wallet, order, command);
 
                         // 매칭 계획 수립 (큐 미변경), 정산
                         List<MatchResult> plan = stageRecorder.record(
@@ -156,8 +152,15 @@ public class OrderService {
                         List<Order> autoCanceledMakers = new ArrayList<>();
                         List<Trade> trades = stageRecorder.record(
                                 market.getSymbol(), side, "settlement",
-                                () -> orderSettlementService.settle(market, order, plan, autoCanceledMakers)
+                                () -> orderSettlementService.settle(market, order, plan, autoCanceledMakers, orderLockLedger)
                         );
+                        if (trades.isEmpty()) {
+                            stageRecorder.record(market.getSymbol(), side, "order_accepted_event_save", () -> {
+                                eventRecorder.recordOrderAccepted(order);
+                                return null;
+                            });
+                            orderAssetLockService.saveOrderLockLedger(orderLockLedger, command);
+                        }
 
                         // 커밋 성공 후 오더북 반영 — DB 롤백 시 큐는 그대로
                         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {

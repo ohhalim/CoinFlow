@@ -40,16 +40,20 @@ public class OrderAssetLockService {
         return wallet;
     }
 
-    public void recordOrderLockLedger(Wallet wallet, Order order, CreateOrderCommand command) {
+    public WalletLedger createOrderLockLedger(Wallet wallet, Order order, CreateOrderCommand command) {
+        return WalletLedger.create(
+                wallet,
+                LedgerType.ORDER_LOCK,
+                command.lockedAmount().negate(),
+                command.lockedAmount(),
+                order.getId(),
+                null
+        );
+    }
+
+    public void saveOrderLockLedger(WalletLedger ledger, CreateOrderCommand command) {
         stageRecorder.record(command.market().getSymbol(), command.side(), "order_lock_ledger_save", () -> {
-            walletLedgerJdbcRepository.save(WalletLedger.create(
-                    wallet,
-                    LedgerType.ORDER_LOCK,
-                    command.lockedAmount().negate(),
-                    command.lockedAmount(),
-                    order.getId(),
-                    null
-            ));
+            walletLedgerJdbcRepository.save(ledger);
             return null;
         });
     }

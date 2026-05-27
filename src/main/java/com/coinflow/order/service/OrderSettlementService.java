@@ -55,11 +55,15 @@ public class OrderSettlementService {
             Market market,
             Order taker,
             List<MatchResult> matchResults,
-            List<Order> autoCanceledMakers
+            List<Order> autoCanceledMakers,
+            WalletLedger orderLockLedger
     ) {
         if (matchResults.isEmpty()) return List.of();
 
         List<Trade> trades = new ArrayList<>();
+        List<WalletLedger> ledgers = new ArrayList<>();
+        ledgers.add(orderLockLedger);
+        boolean takerAcceptedEventRecorded = false;
 
         for (MatchResult result : matchResults) {
             Order maker = stageRecorder.record(
@@ -130,36 +134,39 @@ public class OrderSettlementService {
             Long sellOrderId = result.sellOrderId();
             Long tradeId = trade.getId();
 
+            boolean recordTakerAcceptedEvent = !takerAcceptedEventRecorded;
             stageRecorder.record(market.getSymbol(), taker.getSide(), "settlement_events_save", () -> {
+                if (recordTakerAcceptedEvent) {
+                    eventRecorder.recordOrderAcceptedAndSettlementEvents(taker, maker, taker, trade);
+                    return null;
+                }
                 eventRecorder.recordSettlementEvents(maker, taker, trade);
                 return null;
             });
+            takerAcceptedEventRecorded = true;
 
-            stageRecorder.record(market.getSymbol(), taker.getSide(), "settlement_ledger_save", () -> {
-                walletLedgerJdbcRepository.saveAll(List.of(
-                        WalletLedger.create(
-                                buyerQuoteWallet, LedgerType.TRADE_BUY_QUOTE_SETTLE,
-                                amounts.buyerRefund(), amounts.buyerReleased().negate(),
-                                buyOrderId, tradeId
-                        ),
-                        WalletLedger.create(
-                                buyerBaseWallet, LedgerType.TRADE_BUY_BASE_CREDIT,
-                                result.quantity(), BigDecimal.ZERO,
-                                buyOrderId, tradeId
-                        ),
-                        WalletLedger.create(
-                                sellerBaseWallet, LedgerType.TRADE_SELL_BASE_SETTLE,
-                                BigDecimal.ZERO, result.quantity().negate(),
-                                sellOrderId, tradeId
-                        ),
-                        WalletLedger.create(
-                                sellerQuoteWallet, LedgerType.TRADE_SELL_QUOTE_CREDIT,
-                                result.quoteAmount(), BigDecimal.ZERO,
-                                sellOrderId, tradeId
-                        )
-                ));
-                return null;
-            });
+            ledgers.addAll(List.of(
+                    WalletLedger.create(
+                            buyerQuoteWallet, LedgerType.TRADE_BUY_QUOTE_SETTLE,
+                            amounts.buyerRefund(), amounts.buyerReleased().negate(),
+                            buyOrderId, tradeId
+                    ),
+                    WalletLedger.create(
+                            buyerBaseWallet, LedgerType.TRADE_BUY_BASE_CREDIT,
+                            result.quantity(), BigDecimal.ZERO,
+                            buyOrderId, tradeId
+                    ),
+                    WalletLedger.create(
+                            sellerBaseWallet, LedgerType.TRADE_SELL_BASE_SETTLE,
+                            BigDecimal.ZERO, result.quantity().negate(),
+                            sellOrderId, tradeId
+                    ),
+                    WalletLedger.create(
+                            sellerQuoteWallet, LedgerType.TRADE_SELL_QUOTE_CREDIT,
+                            result.quoteAmount(), BigDecimal.ZERO,
+                            sellOrderId, tradeId
+                    )
+            ));
 
             if (maker.getRemainingQuantity().signum() > 0) {
                 stageRecorder.record(market.getSymbol(), taker.getSide(), "settlement_dust_cancel", () -> {
@@ -172,7 +179,7 @@ public class OrderSettlementService {
                         makerLockedWallet.unlock(dustRelease);
                         maker.cancel();
                         autoCanceledMakers.add(maker);
-                        walletLedgerJdbcRepository.save(WalletLedger.create(
+                        ledgers.add(WalletLedger.create(
                                 makerLockedWallet, LedgerType.ORDER_CANCEL_RELEASE,
                                 dustRelease, dustRelease.negate(),
                                 maker.getId(), tradeId
@@ -185,6 +192,11 @@ public class OrderSettlementService {
 
             trades.add(trade);
         }
+
+        stageRecorder.record(market.getSymbol(), taker.getSide(), "settlement_ledger_save", () -> {
+            walletLedgerJdbcRepository.saveAll(ledgers);
+            return null;
+        });
 
         return trades;
     }
