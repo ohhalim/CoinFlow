@@ -6,7 +6,7 @@ import com.coinflow.order.domain.Order;
 import com.coinflow.wallet.domain.LedgerType;
 import com.coinflow.wallet.domain.Wallet;
 import com.coinflow.wallet.domain.WalletLedger;
-import com.coinflow.wallet.repository.WalletLedgerRepository;
+import com.coinflow.wallet.repository.WalletLedgerJdbcRepository;
 import com.coinflow.wallet.repository.WalletRepository;
 import org.springframework.stereotype.Service;
 
@@ -14,16 +14,16 @@ import org.springframework.stereotype.Service;
 public class OrderAssetLockService {
 
     private final WalletRepository walletRepository;
-    private final WalletLedgerRepository walletLedgerRepository;
+    private final WalletLedgerJdbcRepository walletLedgerJdbcRepository;
     private final OrderCreateStageRecorder stageRecorder;
 
     public OrderAssetLockService(
             WalletRepository walletRepository,
-            WalletLedgerRepository walletLedgerRepository,
+            WalletLedgerJdbcRepository walletLedgerJdbcRepository,
             OrderCreateStageRecorder stageRecorder
     ) {
         this.walletRepository = walletRepository;
-        this.walletLedgerRepository = walletLedgerRepository;
+        this.walletLedgerJdbcRepository = walletLedgerJdbcRepository;
         this.stageRecorder = stageRecorder;
     }
 
@@ -41,15 +41,16 @@ public class OrderAssetLockService {
     }
 
     public void recordOrderLockLedger(Wallet wallet, Order order, CreateOrderCommand command) {
-        stageRecorder.record(command.market().getSymbol(), command.side(), "order_lock_ledger_save", () ->
-                walletLedgerRepository.save(WalletLedger.create(
-                        wallet,
-                        LedgerType.ORDER_LOCK,
-                        command.lockedAmount().negate(),
-                        command.lockedAmount(),
-                        order.getId(),
-                        null
-                ))
-        );
+        stageRecorder.record(command.market().getSymbol(), command.side(), "order_lock_ledger_save", () -> {
+            walletLedgerJdbcRepository.save(WalletLedger.create(
+                    wallet,
+                    LedgerType.ORDER_LOCK,
+                    command.lockedAmount().negate(),
+                    command.lockedAmount(),
+                    order.getId(),
+                    null
+            ));
+            return null;
+        });
     }
 }

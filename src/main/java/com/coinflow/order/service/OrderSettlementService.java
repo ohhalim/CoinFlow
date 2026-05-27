@@ -13,7 +13,7 @@ import com.coinflow.trade.repository.TradeRepository;
 import com.coinflow.wallet.domain.LedgerType;
 import com.coinflow.wallet.domain.Wallet;
 import com.coinflow.wallet.domain.WalletLedger;
-import com.coinflow.wallet.repository.WalletLedgerRepository;
+import com.coinflow.wallet.repository.WalletLedgerJdbcRepository;
 import com.coinflow.wallet.repository.WalletRepository;
 import org.springframework.stereotype.Service;
 
@@ -31,7 +31,7 @@ public class OrderSettlementService {
     private final OrderRepository orderRepository;
     private final WalletRepository walletRepository;
     private final TradeRepository tradeRepository;
-    private final WalletLedgerRepository walletLedgerRepository;
+    private final WalletLedgerJdbcRepository walletLedgerJdbcRepository;
     private final DomainEventRecorder eventRecorder;
     private final OrderCreateStageRecorder stageRecorder;
 
@@ -39,14 +39,14 @@ public class OrderSettlementService {
             OrderRepository orderRepository,
             WalletRepository walletRepository,
             TradeRepository tradeRepository,
-            WalletLedgerRepository walletLedgerRepository,
+            WalletLedgerJdbcRepository walletLedgerJdbcRepository,
             DomainEventRecorder eventRecorder,
             OrderCreateStageRecorder stageRecorder
     ) {
         this.orderRepository = orderRepository;
         this.walletRepository = walletRepository;
         this.tradeRepository = tradeRepository;
-        this.walletLedgerRepository = walletLedgerRepository;
+        this.walletLedgerJdbcRepository = walletLedgerJdbcRepository;
         this.eventRecorder = eventRecorder;
         this.stageRecorder = stageRecorder;
     }
@@ -130,33 +130,33 @@ public class OrderSettlementService {
             Long sellOrderId = result.sellOrderId();
             Long tradeId = trade.getId();
 
-            stageRecorder.record(market.getSymbol(), taker.getSide(), "settlement_trade_event_save", () -> {
-                eventRecorder.recordOrderFillEvent(maker, tradeId);
-                eventRecorder.recordOrderFillEvent(taker, tradeId);
-                eventRecorder.recordTradeCreated(trade);
+            stageRecorder.record(market.getSymbol(), taker.getSide(), "settlement_events_save", () -> {
+                eventRecorder.recordSettlementEvents(maker, taker, trade);
                 return null;
             });
 
             stageRecorder.record(market.getSymbol(), taker.getSide(), "settlement_ledger_save", () -> {
-                walletLedgerRepository.save(WalletLedger.create(
-                        buyerQuoteWallet, LedgerType.TRADE_BUY_QUOTE_SETTLE,
-                        amounts.buyerRefund(), amounts.buyerReleased().negate(),
-                        buyOrderId, tradeId
-                ));
-                walletLedgerRepository.save(WalletLedger.create(
-                        buyerBaseWallet, LedgerType.TRADE_BUY_BASE_CREDIT,
-                        result.quantity(), BigDecimal.ZERO,
-                        buyOrderId, tradeId
-                ));
-                walletLedgerRepository.save(WalletLedger.create(
-                        sellerBaseWallet, LedgerType.TRADE_SELL_BASE_SETTLE,
-                        BigDecimal.ZERO, result.quantity().negate(),
-                        sellOrderId, tradeId
-                ));
-                walletLedgerRepository.save(WalletLedger.create(
-                        sellerQuoteWallet, LedgerType.TRADE_SELL_QUOTE_CREDIT,
-                        result.quoteAmount(), BigDecimal.ZERO,
-                        sellOrderId, tradeId
+                walletLedgerJdbcRepository.saveAll(List.of(
+                        WalletLedger.create(
+                                buyerQuoteWallet, LedgerType.TRADE_BUY_QUOTE_SETTLE,
+                                amounts.buyerRefund(), amounts.buyerReleased().negate(),
+                                buyOrderId, tradeId
+                        ),
+                        WalletLedger.create(
+                                buyerBaseWallet, LedgerType.TRADE_BUY_BASE_CREDIT,
+                                result.quantity(), BigDecimal.ZERO,
+                                buyOrderId, tradeId
+                        ),
+                        WalletLedger.create(
+                                sellerBaseWallet, LedgerType.TRADE_SELL_BASE_SETTLE,
+                                BigDecimal.ZERO, result.quantity().negate(),
+                                sellOrderId, tradeId
+                        ),
+                        WalletLedger.create(
+                                sellerQuoteWallet, LedgerType.TRADE_SELL_QUOTE_CREDIT,
+                                result.quoteAmount(), BigDecimal.ZERO,
+                                sellOrderId, tradeId
+                        )
                 ));
                 return null;
             });
@@ -172,7 +172,7 @@ public class OrderSettlementService {
                         makerLockedWallet.unlock(dustRelease);
                         maker.cancel();
                         autoCanceledMakers.add(maker);
-                        walletLedgerRepository.save(WalletLedger.create(
+                        walletLedgerJdbcRepository.save(WalletLedger.create(
                                 makerLockedWallet, LedgerType.ORDER_CANCEL_RELEASE,
                                 dustRelease, dustRelease.negate(),
                                 maker.getId(), tradeId
@@ -183,10 +183,6 @@ public class OrderSettlementService {
                 });
             }
 
-            stageRecorder.record(market.getSymbol(), taker.getSide(), "settlement_completed_event_save", () -> {
-                eventRecorder.recordSettlementCompleted(trade);
-                return null;
-            });
             trades.add(trade);
         }
 
