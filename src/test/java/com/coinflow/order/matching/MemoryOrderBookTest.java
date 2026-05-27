@@ -11,6 +11,7 @@ import java.math.BigDecimal;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class MemoryOrderBookTest {
 
@@ -46,6 +47,50 @@ class MemoryOrderBookTest {
         assertThat(orderBook.getSellSide())
                 .extracting(OrderBookEntry::orderId)
                 .containsExactly(10L);
+    }
+
+    @Test
+    void planMatchRejectingSelfTrade_자기체결_후보가_있으면_예외를_던지고_큐를_변경하지_않는다() {
+        MemoryOrderBook orderBook = new MemoryOrderBook(0);
+        Order otherMaker = order(
+                2L,
+                20L,
+                OrderSide.SELL,
+                "99000000",
+                "0.0001",
+                "BTC",
+                "0.0001",
+                1L
+        );
+        Order selfMaker = order(
+                1L,
+                10L,
+                OrderSide.SELL,
+                "100000000",
+                "0.0001",
+                "BTC",
+                "0.0001",
+                2L
+        );
+        Order taker = order(
+                1L,
+                30L,
+                OrderSide.BUY,
+                "100000000",
+                "0.0002",
+                "KRW",
+                "20000",
+                3L
+        );
+
+        orderBook.add(otherMaker);
+        orderBook.add(selfMaker);
+
+        assertThatThrownBy(() -> orderBook.planMatchRejectingSelfTrade(taker))
+                .isInstanceOf(SelfTradeDetectedException.class);
+        assertThat(orderBook.getSellSide())
+                .extracting(OrderBookEntry::orderId)
+                .containsExactly(20L, 10L);
     }
 
     private Order order(

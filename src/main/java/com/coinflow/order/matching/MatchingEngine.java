@@ -1,5 +1,7 @@
 package com.coinflow.order.matching;
 
+import com.coinflow.common.exception.ApiException;
+import com.coinflow.common.exception.ErrorCode;
 import com.coinflow.market.domain.Market;
 import com.coinflow.order.domain.Order;
 import com.coinflow.order.domain.OrderSide;
@@ -21,6 +23,18 @@ public class MatchingEngine {
                 k -> new MemoryOrderBook(market.getAmountScale())
         );
         return book.planMatch(taker);
+    }
+
+    public List<MatchResult> planMatchRejectingSelfTrade(Market market, Order taker) {
+        MemoryOrderBook book = orderBooks.computeIfAbsent(
+                market.getSymbol(),
+                k -> new MemoryOrderBook(market.getAmountScale())
+        );
+        try {
+            return book.planMatchRejectingSelfTrade(taker);
+        } catch (SelfTradeDetectedException e) {
+            throw new ApiException(ErrorCode.SELF_TRADE_NOT_ALLOWED);
+        }
     }
 
     public void applyMatchPlan(Market market, Order taker, List<MatchResult> plan) {
