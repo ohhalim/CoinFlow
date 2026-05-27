@@ -99,6 +99,16 @@ public class OrderService {
         CreateOrderCommand command = orderCreateValidator.validate(market, request);
         OrderSide side = command.side();
 
+        if (request.clientOrderId() != null) {
+            boolean duplicatedClientOrderId = stageRecorder.record(
+                    market.getSymbol(), side, "client_order_id_check",
+                    () -> orderRepository.existsByUserIdAndClientOrderId(currentUserId, request.clientOrderId())
+            );
+            if (duplicatedClientOrderId) {
+                throw new ApiException(ErrorCode.DUPLICATE_CLIENT_ORDER_ID);
+            }
+        }
+
         MarketLockScope marketLockScope = acquireMarketLock(market, side);
         AtomicBoolean releaseRegistered = new AtomicBoolean(false);
 
@@ -111,26 +121,6 @@ public class OrderService {
                     transactionMetrics.recordCallbackStarted();
                     long transactionCallbackStartedAt = System.nanoTime();
                     try {
-                        // clientOrderId 중복 검증
-                        if (request.clientOrderId() != null) {
-                            boolean duplicatedClientOrderId = stageRecorder.record(
-                                    market.getSymbol(), side, "client_order_id_check",
-                                    () -> orderRepository.existsByUserIdAndClientOrderId(currentUserId, request.clientOrderId())
-                            );
-                            if (duplicatedClientOrderId) {
-                                throw new ApiException(ErrorCode.DUPLICATE_CLIENT_ORDER_ID);
-                            }
-                        }
-
-                        // self-trade 사전 검증 (MAT-006)
-                        boolean hasSelfTrade = stageRecorder.record(
-                                market.getSymbol(), side, "self_trade_check",
-                                () -> matchingEngine.hasSelfTrade(market.getSymbol(), side, command.price(), currentUserId)
-                        );
-                        if (hasSelfTrade) {
-                            throw new ApiException(ErrorCode.SELF_TRADE_NOT_ALLOWED);
-                        }
-
                         // sequence 발급
                         OrderSequence seq = stageRecorder.record(
                                 market.getSymbol(), side, "sequence_lock",
@@ -161,7 +151,7 @@ public class OrderService {
                         // 매칭 계획 수립 (큐 미변경), 정산
                         List<MatchResult> plan = stageRecorder.record(
                                 market.getSymbol(), side, "matching_plan",
-                                () -> matchingEngine.planMatch(market, order)
+                                () -> matchingEngine.planMatchRejectingSelfTrade(market, order)
                         );
                         List<Order> autoCanceledMakers = new ArrayList<>();
                         List<Trade> trades = stageRecorder.record(
@@ -195,6 +185,7 @@ public class OrderService {
                                 } finally {
                                     stageRecorder.record(market.getSymbol(), side, "orderbook_after_commit",
                                             System.nanoTime() - orderBookApplyStartedAt);
+                                    marketLockScope.release();
                                     transactionMetrics.recordAfterCommitFinished();
                                 }
                             }
