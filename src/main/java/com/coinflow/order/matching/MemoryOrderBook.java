@@ -31,6 +31,18 @@ public class MemoryOrderBook {
     }
 
     public synchronized List<MatchResult> planMatch(Order taker) {
+        return buildMatchPlan(taker);
+    }
+
+    public synchronized List<MatchResult> planMatchRejectingSelfTrade(Order taker) {
+        PriorityQueue<OrderBookEntry> makerQueue = (taker.getSide() == OrderSide.BUY) ? sellQueue : buyQueue;
+        if (hasSelfTradeCandidate(makerQueue, taker.getSide(), taker.getPrice(), taker.getUserId())) {
+            throw new SelfTradeDetectedException();
+        }
+        return buildMatchPlan(taker);
+    }
+
+    private List<MatchResult> buildMatchPlan(Order taker) {
         PriorityQueue<OrderBookEntry> makerQueue = (taker.getSide() == OrderSide.BUY) ? sellQueue : buyQueue;
         PriorityQueue<OrderBookEntry> simulation = new PriorityQueue<>(makerQueue);
 
@@ -128,6 +140,15 @@ public class MemoryOrderBook {
 
     public synchronized boolean hasSelfTrade(OrderSide takerSide, BigDecimal takerPrice, Long userId) {
         PriorityQueue<OrderBookEntry> makerQueue = (takerSide == OrderSide.BUY) ? sellQueue : buyQueue;
+        return hasSelfTradeCandidate(makerQueue, takerSide, takerPrice, userId);
+    }
+
+    private boolean hasSelfTradeCandidate(
+            PriorityQueue<OrderBookEntry> makerQueue,
+            OrderSide takerSide,
+            BigDecimal takerPrice,
+            Long userId
+    ) {
         for (OrderBookEntry maker : makerQueue) {
             boolean priceMatches = (takerSide == OrderSide.BUY)
                     ? takerPrice.compareTo(maker.price()) >= 0
@@ -162,4 +183,7 @@ public class MemoryOrderBook {
                         .thenComparing(OrderBookEntry::sequence))
                 .toList();
     }
+}
+
+class SelfTradeDetectedException extends RuntimeException {
 }
