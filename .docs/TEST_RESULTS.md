@@ -1460,7 +1460,115 @@ Decision:
 - 부하 구간 전체에서 HTTP failed, 5xx, WebSocket/STOMP error는 0으로 유지됐다.
 - 다음 개선 대상은 API 오류나 Kafka/WebSocket 전파가 아니라 단일 market 주문 직렬화 구조다.
 
-## 24. 발견 이슈
+## 24. 단일 market 주문 생성 병목 분석 및 개선
+
+Date: 2026-05-27
+
+Context:
+
+| 항목 | 값 |
+|---|---|
+| Issue | `#74` 단일 market 주문 생성 병목 분석 및 개선 |
+| Branch | `perf/74/single-market-order-bottleneck` |
+| DB | Local Docker MySQL 8 |
+| Kafka | Local Docker Kafka |
+| Hikari pool size | `20` |
+
+Measurement scope:
+
+- `#71` 단일 market 주문 직렬화 병목 완화 이후 처리량 한계 재측정
+- `70 / 90 / 100 / 120 order/s` 단계별 동일 조건 부하 테스트
+- WebSocket subscribers `50`, duration `5m`, buyer/seller `40/40` 유지
+- `90 order/s` 구간 병목 개선 실험 추가
+  - 계측 Timer 캐싱
+  - domain_events / wallet_ledgers JDBC batch insert
+  - MySQL `rewriteBatchedStatements=true`
+
+Verification:
+
+```bash
+DB_POOL_MAX_SIZE=20 DEBUG=false ./gradlew bootRun
+
+WS_SUBSCRIBERS=50 ORDER_RATE=70 DURATION=5m DB_POOL_MAX_SIZE=20 ORDER_VUS=40 ORDER_MAX_VUS=160 BUYER_COUNT=40 SELLER_COUNT=40 k6 run k6/websocket-kafka-load-test.js
+WS_SUBSCRIBERS=50 ORDER_RATE=90 DURATION=5m DB_POOL_MAX_SIZE=20 ORDER_VUS=40 ORDER_MAX_VUS=160 BUYER_COUNT=40 SELLER_COUNT=40 k6 run k6/websocket-kafka-load-test.js
+WS_SUBSCRIBERS=50 ORDER_RATE=100 DURATION=5m DB_POOL_MAX_SIZE=20 ORDER_VUS=40 ORDER_MAX_VUS=160 BUYER_COUNT=40 SELLER_COUNT=40 k6 run k6/websocket-kafka-load-test.js
+WS_SUBSCRIBERS=50 ORDER_RATE=120 DURATION=5m DB_POOL_MAX_SIZE=20 ORDER_VUS=40 ORDER_MAX_VUS=160 BUYER_COUNT=40 SELLER_COUNT=40 k6 run k6/websocket-kafka-load-test.js
+```
+
+Result:
+
+| ORDER_RATE | Status | Created orders | Order-window throughput | Dropped iterations | Order create p95 / p99 / max | Trade lag p95 / p99 / max | HTTP failed / 5xx | WS/STOMP errors |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| `70/s` | PASS: p95 threshold | `20,968` | `69.89 order/s` | `33` | `435.68ms` / `835.63ms` / `1.10s` | `271ms` / `293ms` / `434ms` | `0.00%` / `0` | `0` |
+| `90/s` | FAIL: p95 threshold, VU saturation | `26,406` | `88.02 order/s` | `595` | `1.98s` / `2.30s` / `3.17s` | `290ms` / `307ms` / `409ms` | `0.00%` / `0` | `0` |
+| `100/s` | FAIL: p95 threshold, VU saturation | `27,543` | `91.81 order/s` | `2,458` | `2.10s` / `2.52s` / `2.76s` | `291ms` / `309ms` / `417ms` | `0.00%` / `0` | `0` |
+| `120/s` | FAIL: p95 threshold, VU saturation | `26,369` | `87.90 order/s` | `9,632` | `2.23s` / `2.50s` / `3.60s` | `292ms` / `311ms` / `552ms` | `0.00%` / `0` | `0` |
+
+### 24-1. 개선 실험 결과
+
+Verification:
+
+```bash
+./gradlew test --rerun-tasks
+
+WS_SUBSCRIBERS=50 ORDER_RATE=90 DURATION=5m DB_POOL_MAX_SIZE=20 ORDER_VUS=40 ORDER_MAX_VUS=160 BUYER_COUNT=40 SELLER_COUNT=40 k6 run k6/websocket-kafka-load-test.js
+WS_SUBSCRIBERS=50 ORDER_RATE=100 DURATION=5m DB_POOL_MAX_SIZE=20 ORDER_VUS=40 ORDER_MAX_VUS=160 BUYER_COUNT=40 SELLER_COUNT=40 k6 run k6/websocket-kafka-load-test.js
+```
+
+Verification result:
+
+| 항목 | 결과 |
+|---|---:|
+| `./gradlew test --rerun-tasks` | Passed |
+| Duration | `2m 12s` |
+
+Result:
+
+| Case | ORDER_RATE | Status | Created orders | Order-window throughput | Dropped iterations | Order create p95 / p99 / max | Trade lag p95 / p99 / max | HTTP failed / 5xx | WS/STOMP errors |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| Before `#74` | `90/s` | FAIL: p95 threshold | `26,406` | `88.02 order/s` | `595` | `1.98s` / `2.30s` / `3.17s` | `290ms` / `307ms` / `409ms` | `0.00%` / `0` | `0` |
+| Timer cache only | `90/s` | FAIL: p95 threshold, VU saturation | `26,235` | `87.45 order/s` | `766` | `1.98s` / `2.29s` / `2.95s` | `291ms` / `309ms` / `454ms` | `0.00%` / `0` | `0` |
+| JDBC batch insert | `90/s` | PASS: p95 threshold | `26,997` | `89.99 order/s` | `3` | `216.87ms` / `301.10ms` / `1m22s` | `287ms` / `310ms` / `4.06s` | `0.00%` / `0` | `0` |
+| JDBC batch insert | `100/s` | FAIL: p95 threshold, VU saturation | `20,163` | `67.21 order/s` | `9,838` | `3.26s` / `3.63s` / `4.00s` | `308ms` / `341ms` / `451ms` | `0.00%` / `0` | `0` |
+
+Stage metrics after JDBC batch insert:
+
+| Stage | Max |
+|---|---:|
+| `market_lock_wait` | `3.6211s` |
+| `market_lock_hold` | `131.20ms` |
+| `transaction_template` | `131.21ms` |
+| `transaction_begin` | `8.63ms` |
+| `transaction_callback` | `89.16ms` |
+| `settlement` | `54.08ms` |
+| `settlement_ledger_save` | `10.88ms` |
+| `settlement_events_save` | `7.97ms` |
+| `order_lock_ledger_save` | `11.03ms` |
+| Hikari pending | `0` |
+
+Grafana captures:
+
+| 구간 | Time range | File |
+|---|---|---|
+| 전체 비교 | `2026-05-27 17:50:00 ~ 18:16:00` | `images/single-market-order-bottleneck-full.png` |
+| `90 order/s` 개선 후 | `2026-05-27 17:50:00 ~ 18:06:00` | `images/single-market-order-bottleneck-90rps.png` |
+| `100 order/s` 잔여 병목 | `2026-05-27 18:09:00 ~ 18:15:00` | `images/single-market-order-bottleneck-100rps.png` |
+
+Decision:
+
+- `#71` 이후 `70 order/s`는 order create p95 `435.68ms`로 latency 기준을 통과했다.
+- `70 order/s`에서도 dropped iteration `33`이 남아 완전 무손실 안정 기준으로 보기는 어렵다.
+- `90 order/s`부터 order create p95가 `1s`를 초과하고 VU saturation이 발생한다.
+- `100 / 120 order/s`는 실제 처리량이 `90 order/s` 전후에서 수렴하고 dropped iteration이 증가한다.
+- 계측 Timer 캐싱만으로는 `90 order/s` 구간의 p95와 dropped iteration이 개선되지 않았다.
+- domain_events와 wallet_ledgers를 JDBC batch insert로 전환한 뒤 `90 order/s`는 order create p95 `216.87ms`, dropped iteration `3`으로 latency 기준을 통과했다.
+- `90 order/s` 개선 후에도 `100 order/s`는 order create p95 `3.26s`, dropped iteration `9,838`로 포화 구간이다.
+- Hikari pending은 `0`, transaction begin max는 `8.63ms`로 유지되어 DB connection 대기는 주요 병목에서 제외한다.
+- 부하 구간 전체에서 HTTP failed, 5xx, WebSocket/STOMP error는 0으로 유지됐다.
+- trade delivery lag p95는 `300ms` 이하로 유지되어 실시간 전파 구간은 주요 병목에서 제외한다.
+- 다음 개선 대상은 WebSocket/Kafka 전파가 아니라 단일 market 주문 생성 hot path 내부의 lock hold와 직렬화 처리량이다.
+
+## 25. 발견 이슈
 
 | ID | Severity | Symptom | Suspected cause | Action |
 |---|---|---|---|---|
@@ -1474,6 +1582,8 @@ Decision:
 | ORD-006 | MAJOR | `50 subscribers / 100 order/s / 5m`에서 order create p95 `2.31s`, dropped iteration `5,102`, Hikari pending max `140` 발생 | MySQL row lock wait 미관측. transaction callback 진입 후 market lock 대기로 DB connection 점유 | market lock 획득을 DB transaction 시작 전으로 이동 |
 | ORD-007 | MAJOR | `market_lock_wait`를 transaction 밖으로 이동 후 Hikari pending은 `0`이지만 order create p95 `2.25s`, dropped iteration `6,163` 유지 | DB connection 대기가 아니라 단일 market 주문 직렬화 대기 | 매칭/정산 직렬화 범위 재설계 또는 market lock 분할 검토 |
 | ORD-008 | MAJOR | 단일 market `70 order/s`부터 p95 `1.67s`, `90 order/s`부터 VU saturation 및 dropped iteration 증가 | 단일 market 주문 생성 직렬화 처리량 한계 | 매칭/정산 직렬화 범위 축소 또는 market lock 분할 검토 |
+| ORD-009 | MAJOR | `#71` 이후 `70 order/s`는 p95 기준 통과, `90 order/s`부터 p95 `1.98s`와 dropped iteration `595` 발생 | 단일 market 주문 처리량 한계가 `70~90 order/s` 사이에 위치 | `#74`에서 domain_events / wallet_ledgers JDBC batch insert 적용 |
+| ORD-010 | MAJOR | `#74` 이후 `90 order/s`는 p95 `216.87ms`로 통과했지만, `100 order/s`는 p95 `3.26s`, dropped iteration `9,838` 발생 | 단일 market hot path 처리량 한계가 `90~100 order/s` 사이에 위치 | lock hold 추가 축소 또는 매칭/정산 직렬화 범위 재검토 |
 
 Severity:
 
@@ -1481,7 +1591,7 @@ Severity:
 - `MAJOR`: 5xx, lock timeout, 반복 가능한 성능 병목
 - `MINOR`: 문서/로그/테스트 안정성 개선
 
-## 25. 후속 조치
+## 26. 후속 조치
 
 | Action | Owner | Status | Link |
 |---|---|---|---|
