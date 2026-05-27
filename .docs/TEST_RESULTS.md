@@ -1330,7 +1330,83 @@ Decision:
 - 현재 병목은 트랜잭션 진입 후 market lock 대기 때문에 DB connection이 점유되고, 후속 요청이 Hikari pending으로 밀리는 구조로 판단한다.
 - 다음 개선 방향은 market lock 획득을 DB transaction 시작 전으로 이동해 market 직렬화 대기가 DB connection을 점유하지 않도록 분리하는 것이다.
 
-## 22. 발견 이슈
+## 22. 주문 생성 market lock 트랜잭션 범위 분리
+
+Date: 2026-05-26
+
+Context:
+
+| 항목 | 값 |
+|---|---|
+| Issue | `#68` 주문 생성 market lock 트랜잭션 범위 분리 |
+| Branch | `perf/68/order-market-lock-before-transaction` |
+| DB | Local Docker MySQL 8 |
+| Kafka | Local Docker Kafka |
+| Hikari pool size | `20` |
+| Measurement window | `2026-05-26 12:18:30 ~ 12:25:00 KST` |
+| Grafana capture | `.docs/images/order-market-lock-before-transaction-grafana.png` |
+
+Measurement scope:
+
+- market lock 획득 시점을 `transactionTemplate.execute` 이전으로 이동
+- market 직렬화 대기와 DB connection 점유 구간 분리
+- 동일 조건에서 #66 결과와 비교
+
+Verification:
+
+```bash
+./gradlew test
+
+DB_POOL_MAX_SIZE=20 DEBUG=false ./gradlew bootRun
+
+WS_SUBSCRIBERS=50 ORDER_RATE=100 DURATION=5m DB_POOL_MAX_SIZE=20 ORDER_VUS=40 ORDER_MAX_VUS=160 BUYER_COUNT=40 SELLER_COUNT=40 k6 run k6/websocket-kafka-load-test.js
+```
+
+Result:
+
+| 항목 | #66 Before | #68 After |
+|---|---:|---:|
+| Full regression test | Passed | Passed |
+| k6 scenario status | FAIL: `order_create_duration p95 < 1000ms` 초과 | FAIL: `order_create_duration p95 < 1000ms` 초과 |
+| HTTP failed | `0.00%` | `0.00%` |
+| 5xx | `0` | `0` |
+| Created orders | `24,898` | `23,838` |
+| Created trades | `12,449` | `11,919` |
+| Actual order throughput | `75.15 order/s` | `72.13 order/s` |
+| Dropped iterations | `5,102` | `6,163` |
+| Order create p95 / p99 / max | `2.31s` / `2.76s` / `4.50s` | `2.25s` / `2.43s` / `2.56s` |
+| Trade delivery lag p95 / p99 / max | `1.44s` / `1.70s` / `2.79s` | `283ms` / `297ms` / `378ms` |
+| Kafka consumer lag | `0` | `0` |
+| Hikari active max | `20` | `2` |
+| Hikari pending max | `140` | `0` |
+| JVM GC pause max | `11ms` | `5ms` |
+
+Order create stage max:
+
+| stage | #66 Before | #68 After |
+|---|---:|---:|
+| `total` | `4.5023s` | `2.57s` |
+| `transaction_template` | `2.7541s` | `103.53ms` |
+| `transaction_begin` | `2.4967s` | `42.12ms` |
+| `transaction_callback` | `666.95ms` | `95.40ms` |
+| `market_lock_wait` | `657.22ms` | `2.56s` |
+| `market_lock_hold` | `153.39ms` | `144ms` |
+| `transaction_commit` | `108.66ms` | `57.42ms` |
+| `settlement` | `77.22ms` | `90.20ms` |
+| `settlement_wallet_lock` | `52.82ms` | `52.25ms` |
+| `settlement_trade_event_save` | `41.60ms` | `36.13ms` |
+| `settlement_ledger_save` | `33.73ms` | `23.76ms` |
+
+Decision:
+
+- market lock 대기 중 DB connection을 점유하던 구조는 제거됐다.
+- Hikari active max는 `20 -> 2`, pending max는 `140 -> 0`으로 감소했다.
+- `transaction_begin max`는 `2.4967s -> 42.12ms`, `transaction_template max`는 `2.7541s -> 103.53ms`로 감소했다.
+- 주문 생성 전체 지연은 DB connection 대기가 아니라 transaction 시작 전 `market_lock_wait max 2.56s`로 이동했다.
+- 주문 처리량과 dropped iterations는 개선되지 않았으므로, 현재 병목은 단일 market 기준 주문 생성 직렬화 자체로 분리한다.
+- 다음 개선은 market 단일 lock 구조를 유지한 미세 조정보다 매칭/정산 직렬화 범위 재설계 또는 시장/가격 레벨 단위 병렬화 가능성 검토가 우선이다.
+
+## 23. 발견 이슈
 
 | ID | Severity | Symptom | Suspected cause | Action |
 |---|---|---|---|---|
@@ -1342,6 +1418,7 @@ Decision:
 | ORD-004 | MAJOR | pool size `30`에서 order create p95 `2.11s`, dropped iteration `2,133`으로 악화 | 과도한 DB connection 동시성으로 transaction callback, market lock 경합 증가 | transaction callback 내부 DB lock/market lock 경합 완화 |
 | ORD-005 | MAJOR | pool size `20`에서 order create p95 `1.91s`, dropped iteration `1,222` 유지 | `transaction_begin max 1.7400s`, `market_lock_wait max 377.54ms`; 내부 DB write stage는 수십 ms 이하 | transaction begin 대기와 market lock wait 분리 개선 |
 | ORD-006 | MAJOR | `50 subscribers / 100 order/s / 5m`에서 order create p95 `2.31s`, dropped iteration `5,102`, Hikari pending max `140` 발생 | MySQL row lock wait 미관측. transaction callback 진입 후 market lock 대기로 DB connection 점유 | market lock 획득을 DB transaction 시작 전으로 이동 |
+| ORD-007 | MAJOR | `market_lock_wait`를 transaction 밖으로 이동 후 Hikari pending은 `0`이지만 order create p95 `2.25s`, dropped iteration `6,163` 유지 | DB connection 대기가 아니라 단일 market 주문 직렬화 대기 | 매칭/정산 직렬화 범위 재설계 또는 market lock 분할 검토 |
 
 Severity:
 
@@ -1349,7 +1426,7 @@ Severity:
 - `MAJOR`: 5xx, lock timeout, 반복 가능한 성능 병목
 - `MINOR`: 문서/로그/테스트 안정성 개선
 
-## 23. 후속 조치
+## 24. 후속 조치
 
 | Action | Owner | Status | Link |
 |---|---|---|---|
@@ -1370,5 +1447,6 @@ Severity:
 | Tune order DB connection pool capacity |  | DONE |  |
 | Measure transaction callback internal DB contention |  | DONE |  |
 | Measure MySQL DB lock wait bottleneck |  | DONE |  |
-| Move market lock acquisition before transaction start |  | TODO |  |
+| Move market lock acquisition before transaction start |  | DONE |  |
 | Reduce order transaction hold time |  | TODO |  |
+| Redesign order creation serialization scope |  | TODO |  |
