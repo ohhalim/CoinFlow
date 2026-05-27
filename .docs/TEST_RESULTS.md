@@ -1406,7 +1406,61 @@ Decision:
 - 주문 처리량과 dropped iterations는 개선되지 않았으므로, 현재 병목은 단일 market 기준 주문 생성 직렬화 자체로 분리한다.
 - 다음 개선은 market 단일 lock 구조를 유지한 미세 조정보다 매칭/정산 직렬화 범위 재설계 또는 시장/가격 레벨 단위 병렬화 가능성 검토가 우선이다.
 
-## 23. 발견 이슈
+## 23. 단일 market 주문 처리량 한계 측정
+
+Date: 2026-05-27
+
+Context:
+
+| 항목 | 값 |
+|---|---|
+| Issue | `#69` 단일 market 주문 처리량 한계 측정 |
+| Branch | `perf/69/single-market-throughput-limit` |
+| DB | Local Docker MySQL 8 |
+| Kafka | Local Docker Kafka |
+| Hikari pool size | `20` |
+
+Measurement scope:
+
+- market lock을 DB transaction 밖으로 이동한 상태에서 단일 market 주문 생성 처리량 한계 측정
+- `50 / 70 / 90 / 100 order/s` 단계별 동일 조건 부하 테스트
+- WebSocket subscribers `50`, duration `5m`, buyer/seller `40/40` 유지
+
+Verification:
+
+```bash
+DB_POOL_MAX_SIZE=20 DEBUG=false ./gradlew bootRun
+
+WS_SUBSCRIBERS=50 ORDER_RATE=50 DURATION=5m DB_POOL_MAX_SIZE=20 ORDER_VUS=40 ORDER_MAX_VUS=160 BUYER_COUNT=40 SELLER_COUNT=40 k6 run k6/websocket-kafka-load-test.js
+WS_SUBSCRIBERS=50 ORDER_RATE=70 DURATION=5m DB_POOL_MAX_SIZE=20 ORDER_VUS=40 ORDER_MAX_VUS=160 BUYER_COUNT=40 SELLER_COUNT=40 k6 run k6/websocket-kafka-load-test.js
+WS_SUBSCRIBERS=50 ORDER_RATE=90 DURATION=5m DB_POOL_MAX_SIZE=20 ORDER_VUS=40 ORDER_MAX_VUS=160 BUYER_COUNT=40 SELLER_COUNT=40 k6 run k6/websocket-kafka-load-test.js
+WS_SUBSCRIBERS=50 ORDER_RATE=100 DURATION=5m DB_POOL_MAX_SIZE=20 ORDER_VUS=40 ORDER_MAX_VUS=160 BUYER_COUNT=40 SELLER_COUNT=40 k6 run k6/websocket-kafka-load-test.js
+```
+
+Result:
+
+| ORDER_RATE | Status | Created orders | Order-window throughput | Dropped iterations | Order create p95 / p99 / max | Trade lag p95 / p99 / max | HTTP failed / 5xx | WS/STOMP errors |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| `50/s` | PASS | `15,001` | `50.00 order/s` | `0` | `32.99ms` / `74.11ms` / `166.17ms` | `252ms` / `270ms` / `420ms` | `0.00%` / `0` | `0` |
+| `70/s` | FAIL: p95 threshold | `20,903` | `69.68 order/s` | `97` | `1.67s` / `1.95s` / `2.40s` | `270ms` / `291ms` / `457ms` | `0.00%` / `0` | `0` |
+| `90/s` | FAIL: p95 threshold, VU saturation | `23,164` | `77.21 order/s` | `3,837` | `2.29s` / `2.68s` / `3.56s` | `283ms` / `299ms` / `492ms` | `0.00%` / `0` | `0` |
+| `100/s` | FAIL: p95 threshold, VU saturation | `24,206` | `80.69 order/s` | `5,795` | `2.23s` / `2.39s` / `2.67s` | `283ms` / `299ms` / `368ms` | `0.00%` / `0` | `0` |
+
+Grafana captures:
+
+- Full range: `.docs/images/single-market-throughput-limit-full.png`
+- Saturation range: `.docs/images/single-market-throughput-limit-saturation.png`
+
+Decision:
+
+- `50 order/s`는 order create p95 `32.99ms`, dropped iteration `0`으로 안정 구간이다.
+- `70 order/s`부터 order create p95가 `1.67s`로 상승하고 dropped iteration이 발생해 latency 기준 안정 구간을 벗어난다.
+- `90 order/s`와 `100 order/s`는 order VU가 상한에 도달하고 dropped iteration이 크게 증가해 포화 구간이다.
+- 단일 market 현재 구조의 안정 처리 기준은 `50 order/s`, latency 기준 임계 구간은 `70 order/s` 부근으로 분리한다.
+- 부하 구간 전체에서 HTTP failed, 5xx, WebSocket/STOMP error는 0으로 유지됐다.
+- 다음 개선 대상은 API 오류나 Kafka/WebSocket 전파가 아니라 단일 market 주문 직렬화 구조다.
+
+## 24. 발견 이슈
 
 | ID | Severity | Symptom | Suspected cause | Action |
 |---|---|---|---|---|
@@ -1419,6 +1473,7 @@ Decision:
 | ORD-005 | MAJOR | pool size `20`에서 order create p95 `1.91s`, dropped iteration `1,222` 유지 | `transaction_begin max 1.7400s`, `market_lock_wait max 377.54ms`; 내부 DB write stage는 수십 ms 이하 | transaction begin 대기와 market lock wait 분리 개선 |
 | ORD-006 | MAJOR | `50 subscribers / 100 order/s / 5m`에서 order create p95 `2.31s`, dropped iteration `5,102`, Hikari pending max `140` 발생 | MySQL row lock wait 미관측. transaction callback 진입 후 market lock 대기로 DB connection 점유 | market lock 획득을 DB transaction 시작 전으로 이동 |
 | ORD-007 | MAJOR | `market_lock_wait`를 transaction 밖으로 이동 후 Hikari pending은 `0`이지만 order create p95 `2.25s`, dropped iteration `6,163` 유지 | DB connection 대기가 아니라 단일 market 주문 직렬화 대기 | 매칭/정산 직렬화 범위 재설계 또는 market lock 분할 검토 |
+| ORD-008 | MAJOR | 단일 market `70 order/s`부터 p95 `1.67s`, `90 order/s`부터 VU saturation 및 dropped iteration 증가 | 단일 market 주문 생성 직렬화 처리량 한계 | 매칭/정산 직렬화 범위 축소 또는 market lock 분할 검토 |
 
 Severity:
 
@@ -1426,7 +1481,7 @@ Severity:
 - `MAJOR`: 5xx, lock timeout, 반복 가능한 성능 병목
 - `MINOR`: 문서/로그/테스트 안정성 개선
 
-## 24. 후속 조치
+## 25. 후속 조치
 
 | Action | Owner | Status | Link |
 |---|---|---|---|
@@ -1448,5 +1503,6 @@ Severity:
 | Measure transaction callback internal DB contention |  | DONE |  |
 | Measure MySQL DB lock wait bottleneck |  | DONE |  |
 | Move market lock acquisition before transaction start |  | DONE |  |
+| Measure single market throughput limit |  | DONE |  |
 | Reduce order transaction hold time |  | TODO |  |
 | Redesign order creation serialization scope |  | TODO |  |
