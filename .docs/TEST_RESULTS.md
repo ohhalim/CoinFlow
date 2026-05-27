@@ -1628,6 +1628,13 @@ Stage metrics after event/ledger batch merge:
 | `settlement_ledger_save` | `14.58ms` | `1.00ms` |
 | Hikari pending | `0` | - |
 
+Grafana captures:
+
+| 구간 | Time range | File |
+|---|---|---|
+| Baseline rerun | `2026-05-27 19:18:40 ~ 19:24:20` | `images/single-market-100rps-before.png` |
+| Event/ledger batch merge | `2026-05-27 19:33:30 ~ 19:39:30` | `images/single-market-100rps-after.png` |
+
 Decision:
 
 - 체결 주문 이벤트/원장 저장 batch 병합 후 created orders는 `28,627`에서 `29,217`로 증가했다.
