@@ -1568,7 +1568,77 @@ Decision:
 - trade delivery lag p95는 `300ms` 이하로 유지되어 실시간 전파 구간은 주요 병목에서 제외한다.
 - 다음 개선 대상은 WebSocket/Kafka 전파가 아니라 단일 market 주문 생성 hot path 내부의 lock hold와 직렬화 처리량이다.
 
-## 25. 발견 이슈
+## 25. 단일 market 100 order/s 부분 개선 및 잔여 병목
+
+Date: 2026-05-27
+
+Context:
+
+| 항목 | 값 |
+|---|---|
+| Issue | `#76` 단일 market 100 order/s 병목 분석 및 처리량 개선 |
+| Branch | `perf/76/single-market-100rps-optimization` |
+| DB | Local Docker MySQL 8 |
+| Kafka | Local Docker Kafka |
+| Hikari pool size | `20` |
+
+Measurement scope:
+
+- `50 WS subscribers / 100 order/s / 5m` 조건 재측정
+- 주문 생성 hot path 내부 DB round-trip 축소
+  - 체결 주문의 `ORDER_ACCEPTED` 이벤트를 settlement event batch에 포함
+  - 체결 주문의 `ORDER_LOCK` 원장을 settlement ledger batch에 포함
+- 잔고, 체결, 원장, 도메인 이벤트 정합성 검증
+- WebSocket/Kafka 전파 지표 악화 여부 확인
+
+Verification:
+
+```bash
+./gradlew test
+
+DB_POOL_MAX_SIZE=20 DEBUG=false ./gradlew bootRun
+WS_SUBSCRIBERS=50 ORDER_RATE=100 DURATION=5m DB_POOL_MAX_SIZE=20 ORDER_VUS=40 ORDER_MAX_VUS=160 BUYER_COUNT=40 SELLER_COUNT=40 k6 run k6/websocket-kafka-load-test.js
+```
+
+Verification result:
+
+| 항목 | 결과 |
+|---|---:|
+| `./gradlew test` | Passed |
+| Duration | `2m 17s` |
+
+Result:
+
+| Case | ORDER_RATE | Status | Created orders | Order-window throughput | Dropped iterations | Order create p95 / p99 / max | Trade lag p95 / p99 / max | HTTP failed / 5xx | WS/STOMP errors |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| Baseline rerun | `100/s` | FAIL: p95 threshold, VU saturation | `28,627` | `95.42 order/s` | `1,373` | `1.72s` / `1.80s` / `1.90s` | `302ms` / `320ms` / `354ms` | `0.00%` / `0` | `0` |
+| Event/ledger batch merge | `100/s` | FAIL: p95 threshold, VU saturation | `29,217` | `97.39 order/s` | `783` | `1.80s` / `1.96s` / `2.16s` | `312ms` / `331ms` / `394ms` | `0.00%` / `0` | `0` |
+
+Stage metrics after event/ledger batch merge:
+
+| Stage | Max | Average |
+|---|---:|---:|
+| `market_lock_wait` | `2.1488s` | `1.0627s` |
+| `market_lock_hold` | `121.03ms` | `10.25ms` |
+| `transaction_template` | `121.07ms` | `10.28ms` |
+| `transaction_callback` | `65.43ms` | `6.81ms` |
+| `settlement` | `55.26ms` | `3.94ms` |
+| `transaction_commit` | `88.54ms` | `3.07ms` |
+| `settlement_events_save` | `21.13ms` | `1.05ms` |
+| `settlement_ledger_save` | `14.58ms` | `1.00ms` |
+| Hikari pending | `0` | - |
+
+Decision:
+
+- 체결 주문 이벤트/원장 저장 batch 병합 후 created orders는 `28,627`에서 `29,217`로 증가했다.
+- dropped iterations는 `1,373`에서 `783`으로 감소했다.
+- order create p95는 `1.80s`로 목표 기준 `1s`를 통과하지 못했다.
+- Hikari pending, HTTP failed, 5xx, WebSocket/STOMP error, Kafka lag는 주요 병목에서 제외한다.
+- `market_lock_hold` 평균이 `10.25ms`로 유지되어 단일 market `100 order/s` 조건에서 직렬 처리 한계에 근접한다.
+- `market_lock_wait` 평균이 `1.0627s`로 남아 있으며, 잔여 병목은 DB connection 대기가 아니라 단일 market 주문 생성 직렬화 대기로 분리한다.
+- 추가 DB write batch만으로는 p95 목표 달성이 어렵다. 다음 개선은 market lock 내부에서 반드시 직렬화해야 하는 구간과 DB 정산 구간을 분리하는 구조 검토가 필요하다.
+
+## 26. 발견 이슈
 
 | ID | Severity | Symptom | Suspected cause | Action |
 |---|---|---|---|---|
@@ -1584,6 +1654,7 @@ Decision:
 | ORD-008 | MAJOR | 단일 market `70 order/s`부터 p95 `1.67s`, `90 order/s`부터 VU saturation 및 dropped iteration 증가 | 단일 market 주문 생성 직렬화 처리량 한계 | 매칭/정산 직렬화 범위 축소 또는 market lock 분할 검토 |
 | ORD-009 | MAJOR | `#71` 이후 `70 order/s`는 p95 기준 통과, `90 order/s`부터 p95 `1.98s`와 dropped iteration `595` 발생 | 단일 market 주문 처리량 한계가 `70~90 order/s` 사이에 위치 | `#74`에서 domain_events / wallet_ledgers JDBC batch insert 적용 |
 | ORD-010 | MAJOR | `#74` 이후 `90 order/s`는 p95 `216.87ms`로 통과했지만, `100 order/s`는 p95 `3.26s`, dropped iteration `9,838` 발생 | 단일 market hot path 처리량 한계가 `90~100 order/s` 사이에 위치 | lock hold 추가 축소 또는 매칭/정산 직렬화 범위 재검토 |
+| ORD-011 | MAJOR | `#76` batch 병합 후 `100 order/s` created orders와 dropped iteration은 개선됐지만 p95 `1.80s` 유지 | 평균 `market_lock_hold 10.25ms`로 단일 market `100 order/s` 직렬 처리 한계 도달 | market lock 내부 직렬화 필수 구간과 DB 정산 구간 분리 검토 |
 
 Severity:
 
@@ -1591,7 +1662,7 @@ Severity:
 - `MAJOR`: 5xx, lock timeout, 반복 가능한 성능 병목
 - `MINOR`: 문서/로그/테스트 안정성 개선
 
-## 26. 후속 조치
+## 27. 후속 조치
 
 | Action | Owner | Status | Link |
 |---|---|---|---|
@@ -1614,5 +1685,6 @@ Severity:
 | Measure MySQL DB lock wait bottleneck |  | DONE |  |
 | Move market lock acquisition before transaction start |  | DONE |  |
 | Measure single market throughput limit |  | DONE |  |
-| Reduce order transaction hold time |  | TODO |  |
+| Reduce matched order event/ledger write round trips |  | DONE |  |
+| Reduce order transaction hold time |  | PARTIAL |  |
 | Redesign order creation serialization scope |  | TODO |  |
