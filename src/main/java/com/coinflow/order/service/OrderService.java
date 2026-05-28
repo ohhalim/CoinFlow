@@ -6,6 +6,7 @@ import com.coinflow.market.domain.Market;
 import com.coinflow.market.repository.MarketRepository;
 import com.coinflow.order.domain.Order;
 import com.coinflow.order.domain.OrderSide;
+import com.coinflow.order.dto.AcceptedOrderResponse;
 import com.coinflow.order.dto.CancelOrderResponse;
 import com.coinflow.order.dto.CreateOrderRequest;
 import com.coinflow.order.dto.CreateOrderResponse;
@@ -56,6 +57,7 @@ public class OrderService {
     private final MarketOrderCommandQueue marketOrderCommandQueue;
     private final MarketSequenceAllocator marketSequenceAllocator;
     private final OrderCreateStageRecorder stageRecorder;
+    private final AcceptedOrderService acceptedOrderService;
     private final TransactionTemplate transactionTemplate;
 
     public OrderService(
@@ -73,6 +75,7 @@ public class OrderService {
             MarketOrderCommandQueue marketOrderCommandQueue,
             MarketSequenceAllocator marketSequenceAllocator,
             OrderCreateStageRecorder stageRecorder,
+            AcceptedOrderService acceptedOrderService,
             PlatformTransactionManager transactionManager
     ) {
         this.marketRepository = marketRepository;
@@ -89,6 +92,7 @@ public class OrderService {
         this.marketOrderCommandQueue = marketOrderCommandQueue;
         this.marketSequenceAllocator = marketSequenceAllocator;
         this.stageRecorder = stageRecorder;
+        this.acceptedOrderService = acceptedOrderService;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
@@ -115,6 +119,10 @@ public class OrderService {
                 side,
                 () -> createOrderInternal(currentUserId, request, market, command, createStartedAt)
         );
+    }
+
+    public AcceptedOrderResponse acceptOrder(Long currentUserId, CreateOrderRequest request) {
+        return acceptedOrderService.acceptOrder(currentUserId, request);
     }
 
     private CreateOrderResponse createOrderInternal(

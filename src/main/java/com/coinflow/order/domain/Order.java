@@ -93,6 +93,38 @@ public class    Order {
         return order;
     }
 
+    public static Order accepted(
+            Long userId,
+            Long marketId,
+            String marketSymbol,
+            OrderSide side,
+            OrderType type,
+            TimeInForce timeInForce,
+            BigDecimal price,
+            BigDecimal originalQuantity,
+            String lockedAsset,
+            BigDecimal lockedAmount,
+            Long sequence,
+            String clientOrderId
+    ) {
+        Order order = create(
+                userId,
+                marketId,
+                marketSymbol,
+                side,
+                type,
+                timeInForce,
+                price,
+                originalQuantity,
+                lockedAsset,
+                lockedAmount,
+                sequence,
+                clientOrderId
+        );
+        order.status = OrderStatus.ACCEPTED;
+        return order;
+    }
+
     public boolean isCancelable() {
         return status == OrderStatus.ACCEPTED
                 || status == OrderStatus.OPEN
@@ -126,6 +158,18 @@ public class    Order {
 
     public void cancel() {
         this.status = OrderStatus.CANCELED;
+        this.lockedAmount = BigDecimal.ZERO;
+        this.closedAt = LocalDateTime.now();
+    }
+
+    public void open() {
+        if (this.status == OrderStatus.ACCEPTED) {
+            this.status = OrderStatus.OPEN;
+        }
+    }
+
+    public void reject() {
+        this.status = OrderStatus.REJECTED;
         this.lockedAmount = BigDecimal.ZERO;
         this.closedAt = LocalDateTime.now();
     }

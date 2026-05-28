@@ -71,7 +71,7 @@ public class OutboxPublisher {
 
     private String resolveTopic(DomainEventType type) {
         return switch (type) {
-            case ORDER_ACCEPTED, ORDER_PARTIALLY_FILLED, ORDER_FILLED, ORDER_CANCELED ->
+            case ORDER_ACCEPTED, ORDER_PARTIALLY_FILLED, ORDER_FILLED, ORDER_REJECTED, ORDER_CANCELED ->
                     properties.getOrderTopic();
             case TRADE_CREATED, SETTLEMENT_COMPLETED ->
                     properties.getTradeTopic();

@@ -68,6 +68,18 @@ public class DomainEventRecorder {
                 ));
     }
 
+    public void recordOrderRejected(Order order, String releasedAsset, String releasedAmount, String reason) {
+        insert(DomainEventType.ORDER_REJECTED, "ORDER", order.getId(),
+                order.getMarketId(), order.getMarketSymbol(),
+                Map.of(
+                        "orderId", order.getId(),
+                        "userId", order.getUserId(),
+                        "releasedAsset", releasedAsset,
+                        "releasedAmount", releasedAmount,
+                        "reason", reason
+                ));
+    }
+
     public void recordTradeCreated(Trade trade) {
         insert(DomainEventType.TRADE_CREATED, "TRADE", trade.getId(),
                 trade.getMarketId(), trade.getMarketSymbol(),
