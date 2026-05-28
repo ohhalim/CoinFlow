@@ -33,4 +33,7 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
     List<Order> findAllByStatusInOrderBySequenceAsc(List<OrderStatus> statuses);
 
     List<Order> findAllByMarketIdAndStatusInOrderBySequenceAsc(Long marketId, List<OrderStatus> statuses);
+
+    @Query("SELECT MAX(o.sequence) FROM Order o WHERE o.marketId = :marketId")
+    Long findMaxSequenceByMarketId(@Param("marketId") Long marketId);
 }
