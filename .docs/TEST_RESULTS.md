@@ -1645,7 +1645,155 @@ Decision:
 - `market_lock_wait` 평균이 `1.0627s`로 남아 있으며, 잔여 병목은 DB connection 대기가 아니라 단일 market 주문 생성 직렬화 대기로 분리한다.
 - 추가 DB write batch만으로는 p95 목표 달성이 어렵다. 다음 개선은 market lock 내부에서 반드시 직렬화해야 하는 구간과 DB 정산 구간을 분리하는 구조 검토가 필요하다.
 
-## 26. 발견 이슈
+## 26. 단일 market 주문 직렬화 범위 검토
+
+Date: 2026-05-27
+
+Context:
+
+| 항목 | 값 |
+|---|---|
+| Issue | `#78` 단일 market 주문 직렬화 범위 검토 |
+| Branch | `perf/78/order-serialization-scope` |
+| DB | Local Docker MySQL 8 |
+| Kafka | Local Docker Kafka |
+| Hikari pool size | `20` |
+
+Measurement scope:
+
+- `50 WS subscribers / 100 order/s / 5m` 조건 재측정
+- 체결 저장 경로를 JPA `save`에서 JDBC insert로 전환하는 실험 수행
+- 잔고, 체결, 원장, 도메인 이벤트 정합성 검증
+- WebSocket/Kafka 전파 지표 악화 여부 확인
+
+Verification:
+
+```bash
+./gradlew test
+
+DB_POOL_MAX_SIZE=20 DEBUG=false ./gradlew bootRun
+WS_SUBSCRIBERS=50 ORDER_RATE=100 DURATION=5m DB_POOL_MAX_SIZE=20 ORDER_VUS=40 ORDER_MAX_VUS=160 BUYER_COUNT=40 SELLER_COUNT=40 k6 run k6/websocket-kafka-load-test.js
+```
+
+Verification result:
+
+| 항목 | 결과 |
+|---|---:|
+| `./gradlew test` | Passed |
+| Duration | `2m 19s` |
+
+Result:
+
+| Case | ORDER_RATE | Status | Created orders | Order-window throughput | Dropped iterations | Order create p95 / p99 / max | Trade lag p95 / p99 / max | HTTP failed / 5xx | WS/STOMP errors |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| Event/ledger batch merge | `100/s` | FAIL: p95 threshold, VU saturation | `29,217` | `97.39 order/s` | `783` | `1.80s` / `1.96s` / `2.16s` | `312ms` / `331ms` / `394ms` | `0.00%` / `0` | `0` |
+| Trade JDBC insert experiment | `100/s` | FAIL: p95 threshold, VU saturation | `29,516` | `98.39 order/s` | `485` | `1.62s` / `1.65s` / `1.69s` | `312ms` / `330ms` / `381ms` | `0.00%` / `0` | `0` |
+
+Stage metrics from trade JDBC insert experiment:
+
+| Stage | Max | Average |
+|---|---:|---:|
+| `market_lock_wait` | `1.6834s` | `1.4754s` |
+| `market_lock_hold` | `55.52ms` | `10.15ms` |
+| `transaction_template` | `55.54ms` | `10.18ms` |
+| `transaction_callback` | `45.24ms` | `6.73ms` |
+| `settlement` | `42.46ms` | `3.87ms` |
+| `transaction_commit` | `39.31ms` | `3.05ms` |
+| `trade_save` | `9.23ms` | `0.57ms` |
+| `settlement_events_save` | `8.02ms` | `1.02ms` |
+| `settlement_ledger_save` | `9.45ms` | `0.99ms` |
+| Hikari pending | `0` | - |
+
+Decision:
+
+- 체결 저장 경로를 JDBC insert로 전환한 실험에서 created orders는 `29,217`에서 `29,516`으로 증가했다.
+- dropped iterations는 `783`에서 `485`로 감소했다.
+- order create p95는 `1.80s`에서 `1.62s`로 감소했으나 목표 기준 `1s`를 통과하지 못했다.
+- `market_lock_hold` 평균은 `10.15ms`로 유지되어 단일 market `100 order/s` 직렬 처리 한계는 해소되지 않았다.
+- Hikari pending, HTTP failed, 5xx, WebSocket/STOMP error, Kafka lag는 주요 병목에서 제외한다.
+- trade 저장 DB write 비용은 일부 감소했으나, 잔여 병목은 개별 write 단계가 아니라 단일 market 주문 생성 직렬화 구조로 판단한다.
+- 코드 복잡도 대비 효과가 제한적이므로 해당 JDBC 전환은 적용하지 않는다.
+- 다음 개선은 추가 DB write 미세 최적화보다 market lock 내부 직렬화 필수 구간과 정산 구간 분리 여부를 구조적으로 검토한다.
+
+## 27. Market command queue 병목 분리
+
+Date: 2026-05-28
+
+Context:
+
+| 항목 | 값 |
+|---|---|
+| Issue | `#78` 단일 market 주문 직렬화 범위 검토 후속 |
+| Branch | `perf/78/order-serialization-scope` |
+| DB | Local Docker MySQL 8 |
+| Kafka | Local Docker Kafka |
+| Hikari pool size | `20` |
+
+Measurement scope:
+
+- 기존 API 응답 계약 유지: `POST /api/v1/orders`는 `201 Created`와 주문 결과 반환
+- 주문 생성 요청을 market별 command queue에 제출
+- market worker가 같은 market 주문을 순서대로 처리
+- 기존 market lock은 cancel 경로와의 정합성을 위해 내부 안전장치로 유지
+- `command_queue_wait`, `command_worker_process`, `order.command.queue.depth` 지표 추가
+- `50 WS subscribers / 100 order/s / 5m` 조건 재측정
+
+Verification:
+
+```bash
+./gradlew test
+
+DB_POOL_MAX_SIZE=20 DEBUG=false ./gradlew bootRun
+WS_SUBSCRIBERS=50 ORDER_RATE=100 DURATION=5m DB_POOL_MAX_SIZE=20 ORDER_VUS=40 ORDER_MAX_VUS=160 BUYER_COUNT=40 SELLER_COUNT=40 k6 run k6/websocket-kafka-load-test.js
+```
+
+Verification result:
+
+| 항목 | 결과 |
+|---|---:|
+| `./gradlew test` | Passed |
+| Duration | `2m 19s` |
+| k6 measurement window | `2026-05-28 11:09:05 ~ 11:14:36` |
+
+Result:
+
+| Case | ORDER_RATE | Status | Created orders | Order-window throughput | Dropped iterations | Order create p95 / p99 / max | Trade lag p95 / p99 / max | HTTP failed / 5xx | WS/STOMP errors |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| Event/ledger batch merge | `100/s` | FAIL: p95 threshold, VU saturation | `29,217` | `97.39 order/s` | `783` | `1.80s` / `1.96s` / `2.16s` | `312ms` / `331ms` / `394ms` | `0.00%` / `0` | `0` |
+| Market command queue | `100/s` | FAIL: p95 threshold, VU saturation | `28,608` | `95.36 order/s` | `1,393` | `1.89s` / `2.07s` / `2.69s` | `311ms` / `333ms` / `517ms` | `0.00%` / `0` | `0` |
+
+Stage metrics from market command queue measurement:
+
+| Stage | Max | Average |
+|---|---:|---:|
+| `command_queue_wait` | `2.6813s` | `1.2278s` |
+| `command_worker_process` | `145.72ms` | `14.35ms` |
+| `market_lock_wait` | `0.0084ms` | `0.00003ms` |
+| `market_lock_hold` | `145.67ms` | `14.31ms` |
+| `transaction_template` | `145.70ms` | `14.33ms` |
+| `transaction_callback` | `132.13ms` | `10.19ms` |
+| `settlement` | `90.75ms` | `8.09ms` |
+| `transaction_commit` | `102.44ms` | `3.74ms` |
+| `order.command.queue.depth` | `159` | - |
+| Hikari pending | `0` | - |
+
+Grafana capture:
+
+| 구간 | Time range | File |
+|---|---|---|
+| Market command queue | `2026-05-28 11:09:05 ~ 11:14:36` | `images/market-command-queue-bottleneck.png` |
+
+Decision:
+
+- `market_lock_wait`는 `0.0084ms` 수준으로 제거됐다.
+- 지연의 대부분은 `command_queue_wait`로 이동했다.
+- `command_worker_process` 평균은 `14.35ms`로, 단일 worker 기준 이론 처리량은 약 `69 order/s` 수준이다.
+- `100 order/s` 유입 조건에서는 queue depth가 최대 `159`까지 증가했고, order create p95는 `1.89s`로 기준 `1s`를 통과하지 못했다.
+- Hikari pending, HTTP failed, 5xx, WebSocket/STOMP error, Kafka lag는 주요 병목에서 제외한다.
+- 이번 변경은 성능 개선보다 병목 분리에 가깝다. 병목은 DB connection 대기나 lock 획득이 아니라 단일 market worker 처리량 부족으로 정리한다.
+- 다음 개선은 API 응답 계약을 유지한 상태에서 worker 내부 처리 시간을 줄이거나, 주문 접수와 체결 완료 응답을 분리하는 비동기 주문 모델을 별도 검토한다.
+
+## 28. 발견 이슈
 
 | ID | Severity | Symptom | Suspected cause | Action |
 |---|---|---|---|---|
@@ -1662,6 +1810,8 @@ Decision:
 | ORD-009 | MAJOR | `#71` 이후 `70 order/s`는 p95 기준 통과, `90 order/s`부터 p95 `1.98s`와 dropped iteration `595` 발생 | 단일 market 주문 처리량 한계가 `70~90 order/s` 사이에 위치 | `#74`에서 domain_events / wallet_ledgers JDBC batch insert 적용 |
 | ORD-010 | MAJOR | `#74` 이후 `90 order/s`는 p95 `216.87ms`로 통과했지만, `100 order/s`는 p95 `3.26s`, dropped iteration `9,838` 발생 | 단일 market hot path 처리량 한계가 `90~100 order/s` 사이에 위치 | lock hold 추가 축소 또는 매칭/정산 직렬화 범위 재검토 |
 | ORD-011 | MAJOR | `#76` batch 병합 후 `100 order/s` created orders와 dropped iteration은 개선됐지만 p95 `1.80s` 유지 | 평균 `market_lock_hold 10.25ms`로 단일 market `100 order/s` 직렬 처리 한계 도달 | market lock 내부 직렬화 필수 구간과 DB 정산 구간 분리 검토 |
+| ORD-012 | MAJOR | `#78` trade JDBC insert 실험에서 dropped iteration은 `783 -> 485`로 감소했지만 p95 `1.62s` 유지 | 개별 DB write 비용보다 단일 market 직렬화 대기 영향이 큼 | JDBC 전환 미적용, 직렬화 범위 재설계 검토 |
+| ORD-013 | MAJOR | market command queue 적용 후 `100 order/s`에서 p95 `1.89s`, queue depth max `159` 유지 | 단일 market worker 처리량이 유입량보다 낮음 | worker 내부 처리 시간 축소 또는 비동기 주문 모델 검토 |
 
 Severity:
 
@@ -1669,7 +1819,7 @@ Severity:
 - `MAJOR`: 5xx, lock timeout, 반복 가능한 성능 병목
 - `MINOR`: 문서/로그/테스트 안정성 개선
 
-## 27. 후속 조치
+## 29. 후속 조치
 
 | Action | Owner | Status | Link |
 |---|---|---|---|
@@ -1694,4 +1844,6 @@ Severity:
 | Measure single market throughput limit |  | DONE |  |
 | Reduce matched order event/ledger write round trips |  | DONE |  |
 | Reduce order transaction hold time |  | PARTIAL |  |
-| Redesign order creation serialization scope |  | TODO |  |
+| Redesign order creation serialization scope |  | DONE |  |
+| Reduce market worker process time |  | TODO |  |
+| Evaluate async order accepted model |  | TODO |  |

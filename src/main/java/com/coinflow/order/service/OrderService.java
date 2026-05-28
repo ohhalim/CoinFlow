@@ -56,6 +56,7 @@ public class OrderService {
     private final OrderCreateValidator orderCreateValidator;
     private final OrderAssetLockService orderAssetLockService;
     private final OrderSettlementService orderSettlementService;
+    private final MarketOrderCommandQueue marketOrderCommandQueue;
     private final OrderCreateStageRecorder stageRecorder;
     private final TransactionTemplate transactionTemplate;
 
@@ -72,6 +73,7 @@ public class OrderService {
             OrderCreateValidator orderCreateValidator,
             OrderAssetLockService orderAssetLockService,
             OrderSettlementService orderSettlementService,
+            MarketOrderCommandQueue marketOrderCommandQueue,
             OrderCreateStageRecorder stageRecorder,
             PlatformTransactionManager transactionManager
     ) {
@@ -87,6 +89,7 @@ public class OrderService {
         this.orderCreateValidator = orderCreateValidator;
         this.orderAssetLockService = orderAssetLockService;
         this.orderSettlementService = orderSettlementService;
+        this.marketOrderCommandQueue = marketOrderCommandQueue;
         this.stageRecorder = stageRecorder;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
@@ -109,6 +112,21 @@ public class OrderService {
             }
         }
 
+        return marketOrderCommandQueue.submit(
+                market,
+                side,
+                () -> createOrderInternal(currentUserId, request, market, command, createStartedAt)
+        );
+    }
+
+    private CreateOrderResponse createOrderInternal(
+            Long currentUserId,
+            CreateOrderRequest request,
+            Market market,
+            CreateOrderCommand command,
+            long createStartedAt
+    ) {
+        OrderSide side = command.side();
         MarketLockScope marketLockScope = acquireMarketLock(market, side);
         AtomicBoolean releaseRegistered = new AtomicBoolean(false);
 
