@@ -985,6 +985,8 @@ Stage 기준:
 | `transaction_begin` | transaction callback 진입 전 대기 시간 |
 | `transaction_callback` | transaction callback 내부 실행 시간 |
 | `transaction_commit` | Spring transaction commit 구간 |
+| `command_queue_wait` | market별 command queue에서 worker 실행 전 대기 시간 |
+| `command_worker_process` | market worker의 주문 생성 내부 처리 시간 |
 | `client_order_id_check` | client order id 중복 검증 시간 |
 | `self_trade_check` | 자전거래 방지 검증 시간 |
 | `sequence_lock` | market sequence 잠금 및 증가 시간 |
@@ -1019,6 +1021,7 @@ Grafana 확인 항목:
 - `Order Create Stage Max`
 - `Order Create Stage Average`
 - `Order Create Lock Stage Max`
+- `Order Command Queue Depth`
 - `Order API Latency Max`
 - `OrderBook Broadcast Duration`
 - `Hikari Active / Pending`
@@ -1031,6 +1034,8 @@ Bottleneck 판단 기준:
 |---|---|
 | `market_lock_wait` 증가 | 동일 market 주문 직렬화 경합 |
 | `market_lock_hold` 증가 | lock 내부 작업량 증가 또는 후속 단계 병목 |
+| `command_queue_wait` 증가 | market worker 처리량 대비 주문 유입량 초과 |
+| `command_worker_process` 증가 | worker 내부 주문 생성 처리 시간 증가 |
 | `transaction_template` 증가 | DB 트랜잭션 전체 병목 |
 | `transaction_begin` 증가 | Hikari connection 획득 또는 transaction begin 대기 |
 | `transaction_callback` 증가 | 트랜잭션 내부 비즈니스/DB 작업 병목 |
@@ -1162,7 +1167,47 @@ WS_SUBSCRIBERS=50 ORDER_RATE=100 DURATION=5m DB_POOL_MAX_SIZE=20 ORDER_VUS=40 OR
 - Grafana 캡처는 rate별 전체를 모두 저장하지 않고, 안정 구간 1개와 포화 구간 1개만 저장한다.
 - 다음 개선 방향은 측정 결과에 따라 market lock 분할, 매칭/정산 직렬화 범위 축소, 또는 구조 유지로 결정한다.
 
-## 16. Invariants
+## 16. Market Command Queue Measurement
+
+단일 market 주문 생성 병목을 lock 대기와 worker 처리 대기로 분리한다. API 응답 계약은 유지하고, 주문 생성 요청은 market별 command queue에 들어간 뒤 market worker에서 순서대로 처리된다.
+
+측정 목적:
+
+- `market_lock_wait`가 `command_queue_wait`로 이동하는지 기록
+- `command_worker_process` 평균 처리 시간이 단일 market 처리량 한계를 설명하는지 기록
+- `order.command.queue.depth`로 테스트 중 queue 적체 여부 관측
+- HTTP p95, dropped iteration, Kafka/WebSocket 지표와 queue 지표 상관관계 기록
+
+추가 Metric:
+
+| Metric | Tags | 의미 |
+|---|---|---|
+| `order.create.stage.duration{stage="command_queue_wait"}` | `market`, `side`, `stage` | worker 처리 전 queue 대기 시간 |
+| `order.create.stage.duration{stage="command_worker_process"}` | `market`, `side`, `stage` | worker 내부 주문 생성 처리 시간 |
+| `order.command.queue.depth` | `market` | market별 queue 적체 수 |
+
+공통 조건:
+
+| 항목 | 값 |
+|---|---:|
+| WebSocket subscribers | `50` |
+| Order rate | `100/s` |
+| Duration | `5m` |
+| Hikari pool size | `20` |
+| Order VUs / Max VUs | `40` / `160` |
+| Buyer / Seller count | `40` / `40` |
+
+판단 기준:
+
+| 결과 | 판단 |
+|---|---|
+| `market_lock_wait` 감소, `command_queue_wait` 증가 | 병목이 lock 경합에서 market worker 대기로 분리됨 |
+| `command_queue_wait` 증가, `command_worker_process` 안정 | 유입량이 단일 worker 처리량을 초과 |
+| `command_worker_process` 증가 | worker 내부 DB 정산 또는 오더북 반영 단계 재분석 |
+| queue depth 증가 후 회복 없음 | 단일 market 처리량 한계 |
+| Kafka lag, WebSocket error, 5xx 미관측 | 실시간 전파와 서버 오류는 병목 후보에서 제외 |
+
+## 17. Invariants
 
 모든 통합 테스트 후 아래 불변식을 검증한다.
 
