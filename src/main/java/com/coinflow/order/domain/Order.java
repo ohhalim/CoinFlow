@@ -94,7 +94,9 @@ public class    Order {
     }
 
     public boolean isCancelable() {
-        return status == OrderStatus.OPEN || status == OrderStatus.PARTIALLY_FILLED;
+        return status == OrderStatus.ACCEPTED
+                || status == OrderStatus.OPEN
+                || status == OrderStatus.PARTIALLY_FILLED;
     }
 
     public BigDecimal releasableAmount() {
