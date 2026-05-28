@@ -37,9 +37,23 @@ public class MarketOrderCommandQueue {
         return queuedCommand.await();
     }
 
+    public boolean submitAsync(Market market, OrderSide side, Long orderId, Runnable command) {
+        MarketWorker worker = workers.computeIfAbsent(
+                market.getId(),
+                ignored -> new MarketWorker(market.getSymbol())
+        );
+        return worker.submitAsync(side, orderId, command);
+    }
+
+    public boolean isQueued(Long marketId, Long orderId) {
+        MarketWorker worker = workers.get(marketId);
+        return worker != null && worker.isQueued(orderId);
+    }
+
     private final class MarketWorker implements Runnable {
         private final String marketSymbol;
         private final BlockingQueue<QueuedCommand<?>> queue = new LinkedBlockingQueue<>();
+        private final ConcurrentMap<Long, Boolean> queuedOrderIds = new ConcurrentHashMap<>();
         private final AtomicInteger queueDepth = new AtomicInteger();
 
         private MarketWorker(String marketSymbol) {
@@ -58,6 +72,25 @@ public class MarketOrderCommandQueue {
             queue.add(command);
         }
 
+        private boolean submitAsync(OrderSide side, Long orderId, Runnable command) {
+            if (queuedOrderIds.putIfAbsent(orderId, Boolean.TRUE) != null) {
+                return false;
+            }
+            queueDepth.incrementAndGet();
+            queue.add(new AsyncQueuedCommand(
+                    marketSymbol,
+                    side,
+                    orderId,
+                    command,
+                    () -> queuedOrderIds.remove(orderId)
+            ));
+            return true;
+        }
+
+        private boolean isQueued(Long orderId) {
+            return queuedOrderIds.containsKey(orderId);
+        }
+
         @Override
         public void run() {
             while (!Thread.currentThread().isInterrupted()) {
@@ -72,17 +105,24 @@ public class MarketOrderCommandQueue {
         }
     }
 
-    private final class QueuedCommand<T> {
+    private class QueuedCommand<T> {
         private final String marketSymbol;
         private final OrderSide side;
         private final Supplier<T> command;
+        private final Runnable afterExecute;
         private final long submittedAt = System.nanoTime();
         private final CompletableFuture<T> future = new CompletableFuture<>();
 
         private QueuedCommand(String marketSymbol, OrderSide side, Supplier<T> command) {
+            this(marketSymbol, side, command, () -> {
+            });
+        }
+
+        private QueuedCommand(String marketSymbol, OrderSide side, Supplier<T> command, Runnable afterExecute) {
             this.marketSymbol = marketSymbol;
             this.side = side;
             this.command = command;
+            this.afterExecute = afterExecute;
         }
 
         private void execute() {
@@ -95,6 +135,7 @@ public class MarketOrderCommandQueue {
                 future.completeExceptionally(e);
             } finally {
                 stageRecorder.record(marketSymbol, side, "command_worker_process", System.nanoTime() - startedAt);
+                afterExecute.run();
             }
         }
 
@@ -111,6 +152,28 @@ public class MarketOrderCommandQueue {
                 }
                 throw e;
             }
+        }
+    }
+
+    private final class AsyncQueuedCommand extends QueuedCommand<Void> {
+        private final Long orderId;
+
+        private AsyncQueuedCommand(
+                String marketSymbol,
+                OrderSide side,
+                Long orderId,
+                Runnable command,
+                Runnable afterExecute
+        ) {
+            super(marketSymbol, side, () -> {
+                command.run();
+                return null;
+            }, afterExecute);
+            this.orderId = orderId;
+        }
+
+        private Long orderId() {
+            return orderId;
         }
     }
 }

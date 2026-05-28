@@ -21,8 +21,10 @@ import org.springframework.context.annotation.Import;
 import org.springframework.http.*;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.util.Map;
 
+import static org.awaitility.Awaitility.await;
 import static org.assertj.core.api.Assertions.assertThat;
 
 @SuppressWarnings({"rawtypes", "unchecked"})
@@ -97,6 +99,54 @@ class OrderApiTest {
         var user = userRepository.findByEmail("order002@example.com").orElseThrow();
         var btcWallet = findWallet(user.getId(), "BTC");
         assertThat(btcWallet.getLockedBalance()).isEqualByComparingTo("0.0001");
+    }
+
+    @Test
+    void 비동기_주문_접수는_ACCEPTED_응답_후_worker에서_OPEN으로_전이된다() {
+        String token = signupAndLogin("order002a@example.com");
+        depositKrw("order002a@example.com", new BigDecimal("10000000"));
+
+        var response = createAsyncOrder(token, "BTC-KRW", "BUY", "LIMIT", "GTC",
+                "100000000", "0.0001", null);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+        assertThat(response.getBody()).containsKeys("orderId", "market", "side", "status", "acceptedAt");
+        assertThat(response.getBody().get("status")).isEqualTo("ACCEPTED");
+
+        Long orderId = ((Number) response.getBody().get("orderId")).longValue();
+        await().atMost(Duration.ofSeconds(3)).untilAsserted(() ->
+                assertThat(orderRepository.findById(orderId).orElseThrow().getStatus().name()).isEqualTo("OPEN")
+        );
+
+        var user = userRepository.findByEmail("order002a@example.com").orElseThrow();
+        var krwWallet = findWallet(user.getId(), "KRW");
+        assertThat(krwWallet.getLockedBalance()).isEqualByComparingTo("10000");
+        assertThat(krwWallet.getAvailableBalance()).isEqualByComparingTo("9990000");
+    }
+
+    @Test
+    void 비동기_주문은_worker에서_체결_정산된다() {
+        String buyerToken = signupAndLogin("order002b-buyer@example.com");
+        String sellerToken = signupAndLogin("order002b-seller@example.com");
+        depositKrw("order002b-buyer@example.com", new BigDecimal("10000000"));
+        depositBtc("order002b-seller@example.com", new BigDecimal("0.001"));
+
+        var sellResponse = createAsyncOrder(sellerToken, "BTC-KRW", "SELL", "LIMIT", "GTC",
+                "100000000", "0.0001", null);
+        Long sellOrderId = ((Number) sellResponse.getBody().get("orderId")).longValue();
+        await().atMost(Duration.ofSeconds(3)).untilAsserted(() ->
+                assertThat(orderRepository.findById(sellOrderId).orElseThrow().getStatus().name()).isEqualTo("OPEN")
+        );
+
+        var buyResponse = createAsyncOrder(buyerToken, "BTC-KRW", "BUY", "LIMIT", "GTC",
+                "100000000", "0.0001", null);
+        Long buyOrderId = ((Number) buyResponse.getBody().get("orderId")).longValue();
+
+        await().atMost(Duration.ofSeconds(3)).untilAsserted(() -> {
+            assertThat(orderRepository.findById(sellOrderId).orElseThrow().getStatus().name()).isEqualTo("FILLED");
+            assertThat(orderRepository.findById(buyOrderId).orElseThrow().getStatus().name()).isEqualTo("FILLED");
+            assertThat(tradeRepository.count()).isEqualTo(1);
+        });
     }
 
     @Test
@@ -180,6 +230,18 @@ class OrderApiTest {
 
         createOrder(token, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000", "0.0001", "my-order-1");
         var response = createOrder(token, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000", "0.0001", "my-order-1");
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(response.getBody().get("code")).isEqualTo("DUPLICATE_CLIENT_ORDER_ID");
+    }
+
+    @Test
+    void 비동기_주문_접수_clientOrderId_중복() {
+        String token = signupAndLogin("order006a@example.com");
+        depositKrw("order006a@example.com", new BigDecimal("100000000"));
+
+        createAsyncOrder(token, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000", "0.0001", "my-async-order-1");
+        var response = createAsyncOrder(token, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000", "0.0001", "my-async-order-1");
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
         assertThat(response.getBody().get("code")).isEqualTo("DUPLICATE_CLIENT_ORDER_ID");
@@ -471,6 +533,18 @@ class OrderApiTest {
     private ResponseEntity<Map> createOrder(String token, String market, String side, String type,
                                              String timeInForce, String price, String quantity,
                                              String clientOrderId) {
+        return createOrder(token, "/api/v1/orders", market, side, type, timeInForce, price, quantity, clientOrderId);
+    }
+
+    private ResponseEntity<Map> createAsyncOrder(String token, String market, String side, String type,
+                                                 String timeInForce, String price, String quantity,
+                                                 String clientOrderId) {
+        return createOrder(token, "/api/v1/orders/async", market, side, type, timeInForce, price, quantity, clientOrderId);
+    }
+
+    private ResponseEntity<Map> createOrder(String token, String url, String market, String side, String type,
+                                            String timeInForce, String price, String quantity,
+                                            String clientOrderId) {
         HttpHeaders headers = new HttpHeaders();
         headers.setBearerAuth(token);
         var body = new java.util.HashMap<String, String>();
@@ -481,7 +555,7 @@ class OrderApiTest {
         body.put("price", price);
         body.put("quantity", quantity);
         if (clientOrderId != null) body.put("clientOrderId", clientOrderId);
-        return restTemplate.exchange("/api/v1/orders", HttpMethod.POST, new HttpEntity<>(body, headers), Map.class);
+        return restTemplate.exchange(url, HttpMethod.POST, new HttpEntity<>(body, headers), Map.class);
     }
 
     private ResponseEntity<Map> cancelOrder(String token, Long orderId) {

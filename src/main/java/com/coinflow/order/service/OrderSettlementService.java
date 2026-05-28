@@ -58,12 +58,25 @@ public class OrderSettlementService {
             List<Order> autoCanceledMakers,
             WalletLedger orderLockLedger
     ) {
+        return settle(market, taker, matchResults, autoCanceledMakers, orderLockLedger, true);
+    }
+
+    public List<Trade> settle(
+            Market market,
+            Order taker,
+            List<MatchResult> matchResults,
+            List<Order> autoCanceledMakers,
+            WalletLedger orderLockLedger,
+            boolean recordTakerAcceptedEvent
+    ) {
         if (matchResults.isEmpty()) return List.of();
 
         List<Trade> trades = new ArrayList<>();
         List<WalletLedger> ledgers = new ArrayList<>();
-        ledgers.add(orderLockLedger);
-        boolean takerAcceptedEventRecorded = false;
+        if (orderLockLedger != null) {
+            ledgers.add(orderLockLedger);
+        }
+        boolean takerAcceptedEventRecorded = !recordTakerAcceptedEvent;
 
         for (MatchResult result : matchResults) {
             Order maker = stageRecorder.record(
@@ -134,9 +147,9 @@ public class OrderSettlementService {
             Long sellOrderId = result.sellOrderId();
             Long tradeId = trade.getId();
 
-            boolean recordTakerAcceptedEvent = !takerAcceptedEventRecorded;
+            boolean shouldRecordTakerAcceptedEvent = !takerAcceptedEventRecorded;
             stageRecorder.record(market.getSymbol(), taker.getSide(), "settlement_events_save", () -> {
-                if (recordTakerAcceptedEvent) {
+                if (shouldRecordTakerAcceptedEvent) {
                     eventRecorder.recordOrderAcceptedAndSettlementEvents(taker, maker, taker, trade);
                     return null;
                 }

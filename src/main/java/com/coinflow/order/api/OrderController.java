@@ -1,6 +1,7 @@
 package com.coinflow.order.api;
 
 import com.coinflow.order.dto.CancelOrderResponse;
+import com.coinflow.order.dto.AcceptedOrderResponse;
 import com.coinflow.order.dto.CreateOrderRequest;
 import com.coinflow.order.dto.CreateOrderResponse;
 import com.coinflow.order.dto.OrderDetailResponse;
@@ -11,6 +12,7 @@ import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.validation.annotation.Validated;
@@ -41,6 +43,16 @@ public class OrderController {
     ) {
         Long userId = Long.parseLong(jwt.getSubject());
         return orderService.createOrder(userId, request);
+    }
+
+    @PostMapping("/async")
+    public ResponseEntity<AcceptedOrderResponse> acceptOrder(
+            @AuthenticationPrincipal Jwt jwt,
+            @Valid @RequestBody CreateOrderRequest request
+    ) {
+        Long userId = Long.parseLong(jwt.getSubject());
+        return ResponseEntity.status(HttpStatus.ACCEPTED)
+                .body(orderService.acceptOrder(userId, request));
     }
 
     @PostMapping("/{id}/cancel")
