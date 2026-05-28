@@ -62,6 +62,7 @@
 | 상태 조회 | 주문 상태 API와 WebSocket 이벤트 기준 |
 | 정합성 | 자산 잠금, 주문 상태 전이, 원장 기록 기준 유지 |
 | 상세 문서 | [Async Order Acceptance](../design/ASYNC_ORDER_ACCEPTANCE.md) |
+| 병목 분석 | [Worker DB I/O Analysis](../design/WORKER_DB_IO_ANALYSIS.md) |
 
 ---
 
