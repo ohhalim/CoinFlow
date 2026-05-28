@@ -548,9 +548,13 @@ Response:
 - 주문 생성 응답의 `trades[].liquidity`는 생성된 주문 기준으로 `MAKER` 또는 `TAKER`를 반환한다. 일반적으로 새 주문은 taker로 매칭된다.
 - `clientOrderId`는 optional이다. 값이 있으면 동일 사용자 내 중복을 거절한다(`DUPLICATE_CLIENT_ORDER_ID`). 값이 없으면 멱등성을 보장하지 않으며, null 주문 여러 건을 허용한다.
 
-비동기 주문 접수 응답 모델:
+비동기 주문 접수:
 
-현재 `POST /api/v1/orders`는 기존 `201 Created` 동기 응답을 유지한다. 비동기 전환 시에는 주문 접수 결과만 반환하고, 체결 결과는 주문 조회 API와 WebSocket feed로 확인한다.
+```http
+POST /api/v1/orders/async
+```
+
+현재 `POST /api/v1/orders`는 기존 `201 Created` 동기 응답을 유지한다. `POST /api/v1/orders/async`는 주문 접수 결과만 반환하고, 체결 결과는 주문 조회 API와 WebSocket feed로 확인한다.
 
 Status:
 
@@ -575,8 +579,9 @@ Response:
 
 - `trades` 필드 제외
 - 체결 결과는 `GET /api/v1/orders/{orderId}`와 `/topic/trades/{market}` 기준
-- `ACCEPTED`, `REJECTED` 상태는 비동기 주문 처리 전환 범위에서 사용
-- 실제 `202 Accepted` 전환은 주문 접수 transaction 분리 이후 적용
+- `ACCEPTED` 주문은 market worker 처리 후 `OPEN`, `PARTIALLY_FILLED`, `FILLED` 중 하나로 전이
+- worker 처리 실패 시 `REJECTED`로 전이하고 locked asset을 해제
+- queue 누락 복구는 오래된 `ACCEPTED` 주문 재등록 기준
 
 ### 6.2 주문 취소
 
