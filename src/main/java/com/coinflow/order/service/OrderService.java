@@ -5,7 +5,6 @@ import com.coinflow.common.exception.ErrorCode;
 import com.coinflow.market.domain.Market;
 import com.coinflow.market.repository.MarketRepository;
 import com.coinflow.order.domain.Order;
-import com.coinflow.order.domain.OrderSequence;
 import com.coinflow.order.domain.OrderSide;
 import com.coinflow.order.dto.CancelOrderResponse;
 import com.coinflow.order.dto.CreateOrderRequest;
@@ -17,7 +16,6 @@ import com.coinflow.order.matching.MatchResult;
 import com.coinflow.order.matching.MatchingEngine;
 import com.coinflow.order.matching.OrderBookRecoveryService;
 import com.coinflow.order.repository.OrderRepository;
-import com.coinflow.order.repository.OrderSequenceRepository;
 import com.coinflow.trade.domain.Trade;
 import com.coinflow.wallet.domain.LedgerType;
 import com.coinflow.wallet.domain.Wallet;
@@ -46,7 +44,6 @@ public class OrderService {
 
     private final MarketRepository marketRepository;
     private final OrderRepository orderRepository;
-    private final OrderSequenceRepository orderSequenceRepository;
     private final WalletRepository walletRepository;
     private final WalletLedgerRepository walletLedgerRepository;
     private final MatchingEngine matchingEngine;
@@ -57,13 +54,13 @@ public class OrderService {
     private final OrderAssetLockService orderAssetLockService;
     private final OrderSettlementService orderSettlementService;
     private final MarketOrderCommandQueue marketOrderCommandQueue;
+    private final MarketSequenceAllocator marketSequenceAllocator;
     private final OrderCreateStageRecorder stageRecorder;
     private final TransactionTemplate transactionTemplate;
 
     public OrderService(
             MarketRepository marketRepository,
             OrderRepository orderRepository,
-            OrderSequenceRepository orderSequenceRepository,
             WalletRepository walletRepository,
             WalletLedgerRepository walletLedgerRepository,
             MatchingEngine matchingEngine,
@@ -74,12 +71,12 @@ public class OrderService {
             OrderAssetLockService orderAssetLockService,
             OrderSettlementService orderSettlementService,
             MarketOrderCommandQueue marketOrderCommandQueue,
+            MarketSequenceAllocator marketSequenceAllocator,
             OrderCreateStageRecorder stageRecorder,
             PlatformTransactionManager transactionManager
     ) {
         this.marketRepository = marketRepository;
         this.orderRepository = orderRepository;
-        this.orderSequenceRepository = orderSequenceRepository;
         this.walletRepository = walletRepository;
         this.walletLedgerRepository = walletLedgerRepository;
         this.matchingEngine = matchingEngine;
@@ -90,6 +87,7 @@ public class OrderService {
         this.orderAssetLockService = orderAssetLockService;
         this.orderSettlementService = orderSettlementService;
         this.marketOrderCommandQueue = marketOrderCommandQueue;
+        this.marketSequenceAllocator = marketSequenceAllocator;
         this.stageRecorder = stageRecorder;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
@@ -139,13 +137,10 @@ public class OrderService {
                     transactionMetrics.recordCallbackStarted();
                     long transactionCallbackStartedAt = System.nanoTime();
                     try {
-                        // sequence 발급
-                        OrderSequence seq = stageRecorder.record(
-                                market.getSymbol(), side, "sequence_lock",
-                                () -> orderSequenceRepository.findByMarketIdWithLock(market.getId())
-                                        .orElseThrow(() -> new ApiException(ErrorCode.MARKET_NOT_FOUND))
+                        Long sequence = stageRecorder.record(
+                                market.getSymbol(), side, "sequence_allocate",
+                                () -> marketSequenceAllocator.nextSequence(market.getId())
                         );
-                        Long sequence = seq.nextSequence();
 
                         Wallet wallet = orderAssetLockService.lockTakerWallet(currentUserId, command);
 

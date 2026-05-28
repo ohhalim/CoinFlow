@@ -1793,7 +1793,97 @@ Decision:
 - 이번 변경은 성능 개선보다 병목 분리에 가깝다. 병목은 DB connection 대기나 lock 획득이 아니라 단일 market worker 처리량 부족으로 정리한다.
 - 다음 개선은 API 응답 계약을 유지한 상태에서 worker 내부 처리 시간을 줄이거나, 주문 접수와 체결 완료 응답을 분리하는 비동기 주문 모델을 별도 검토한다.
 
-## 28. 발견 이슈
+## 28. Market sequence DB lock 제거
+
+Date: 2026-05-28
+
+Context:
+
+| 항목 | 값 |
+|---|---|
+| Issue | `#84` market sequence 발급 DB lock 제거 |
+| Branch | `perf/84/market-sequence-lock-removal` |
+| DB | Local Docker MySQL 8 |
+| Kafka | Local Docker Kafka |
+| Hikari pool size | `20` |
+
+Measurement scope:
+
+- 기존 API 응답 계약 유지: `POST /api/v1/orders`는 `201 Created`와 주문 결과 반환
+- 기존 `order_sequences` DB row lock 기반 sequence 발급 제거
+- market worker 순차 처리 기준의 `MarketSequenceAllocator` 추가
+- sequence 초기값은 `orders.max(sequence)`와 `order_sequences.last_sequence` 중 큰 값 기준
+- `sequence_allocate` stage 추가
+- `50 WS subscribers / 100 order/s / 5m` 조건 재측정
+
+Verification:
+
+```bash
+./gradlew test
+
+DB_POOL_MAX_SIZE=20 DEBUG=false ./gradlew bootRun
+WS_SUBSCRIBERS=50 ORDER_RATE=100 DURATION=5m DB_POOL_MAX_SIZE=20 ORDER_VUS=40 ORDER_MAX_VUS=160 BUYER_COUNT=40 SELLER_COUNT=40 k6 run k6/websocket-kafka-load-test.js
+```
+
+Verification result:
+
+| 항목 | 결과 |
+|---|---:|
+| `./gradlew test` | Passed |
+| Duration | `2m 21s` |
+| k6 measurement window | `2026-05-28 14:51:46 ~ 14:57:18` |
+
+Result:
+
+| Case | ORDER_RATE | Status | Created orders | Order-window throughput | Dropped iterations | Order create p95 / p99 / max | Trade lag p95 / p99 / max | HTTP failed / 5xx | WS/STOMP errors |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| Market command queue | `100/s` | FAIL: p95 threshold, VU saturation | `28,608` | `95.36 order/s` | `1,393` | `1.89s` / `2.07s` / `2.69s` | `311ms` / `333ms` / `517ms` | `0.00%` / `0` | `0` |
+| Sequence allocator | `100/s` | FAIL: p95 threshold, VU saturation | `29,543` | `98.48 order/s` | `458` | `1.65s` / `2.07s` / `2.43s` | `318ms` / `345ms` / `627ms` | `0.00%` / `0` | `0` |
+
+Stage metrics from sequence allocator measurement:
+
+| Stage | Max | Average |
+|---|---:|---:|
+| `sequence_allocate` | `0.039ms` | `0.001ms` |
+| `command_queue_wait` | `1.8581s` | `431.93ms` |
+| `command_worker_process` | `85.66ms` | `9.73ms` |
+| `market_lock_wait` | `0.0042ms` | `0.00005ms` |
+| `market_lock_hold` | `85.64ms` | `9.70ms` |
+| `transaction_template` | `85.66ms` | `9.72ms` |
+| `transaction_callback` | `71.86ms` | `6.28ms` |
+| `settlement` | `68.29ms` | `3.88ms` |
+| `transaction_commit` | `68.76ms` | `3.04ms` |
+| Hikari pending | `0` | - |
+| Kafka consumer lag | `0` | - |
+
+Decision:
+
+- DB row lock 기반 sequence 발급은 hot path에서 제거됐다.
+- `sequence_allocate`는 max `0.039ms`, avg `0.001ms` 수준으로 측정됐다.
+- `command_worker_process` 평균은 `14.35ms`에서 `9.73ms`로 감소했다.
+- `command_queue_wait` 평균은 `1.2278s`에서 `431.93ms`로 감소했다.
+- order-window throughput은 `95.36 order/s`에서 `98.48 order/s`로 증가했다.
+- dropped iteration은 `1,393`에서 `458`로 감소했다.
+- order create p95는 `1.89s`에서 `1.65s`로 감소했으나 목표 기준 `1s`를 통과하지 못했다.
+- Hikari pending, HTTP failed, 5xx, WebSocket/STOMP error, Kafka lag는 주요 병목에서 제외한다.
+- sequence lock 제거는 유효한 부분 개선으로 판단한다.
+- 잔여 병목은 `command_queue_wait`와 단일 market worker 처리량 한계로 유지된다.
+
+Operational assumptions and cautions:
+
+- 현재 sequence allocator는 단일 애플리케이션 인스턴스 기준으로 유효하다.
+- 같은 market 주문은 반드시 하나의 market worker에서 순차 처리되어야 한다.
+- market worker를 병렬화할 경우 sequence 중복 또는 순서 역전 가능성이 있다.
+- 애플리케이션을 다중 인스턴스로 확장할 경우 메모리 기반 sequence 발급은 사용할 수 없다.
+- 다중 인스턴스 확장 시 sequence 발급 전략 재검토 필요
+  - DB sequence lock 재도입
+  - Redis `INCR`
+  - Kafka partition offset
+  - Snowflake/ULID 계열 external sequence
+- 재시작 시 sequence 초기값은 `orders.max(sequence)`와 `order_sequences.last_sequence` 중 큰 값 기준으로 복구한다.
+- `order_sequences.last_sequence`는 hot path에서 더 이상 실시간 증가하지 않으므로 운영 기준 source of truth는 `orders.max(sequence)`다.
+
+## 29. 발견 이슈
 
 | ID | Severity | Symptom | Suspected cause | Action |
 |---|---|---|---|---|
@@ -1812,6 +1902,7 @@ Decision:
 | ORD-011 | MAJOR | `#76` batch 병합 후 `100 order/s` created orders와 dropped iteration은 개선됐지만 p95 `1.80s` 유지 | 평균 `market_lock_hold 10.25ms`로 단일 market `100 order/s` 직렬 처리 한계 도달 | market lock 내부 직렬화 필수 구간과 DB 정산 구간 분리 검토 |
 | ORD-012 | MAJOR | `#78` trade JDBC insert 실험에서 dropped iteration은 `783 -> 485`로 감소했지만 p95 `1.62s` 유지 | 개별 DB write 비용보다 단일 market 직렬화 대기 영향이 큼 | JDBC 전환 미적용, 직렬화 범위 재설계 검토 |
 | ORD-013 | MAJOR | market command queue 적용 후 `100 order/s`에서 p95 `1.89s`, queue depth max `159` 유지 | 단일 market worker 처리량이 유입량보다 낮음 | worker 내부 처리 시간 축소 또는 비동기 주문 모델 검토 |
+| ORD-014 | MAJOR | sequence lock 제거 후 dropped iteration은 `1,393 -> 458`로 감소했지만 p95 `1.65s` 유지 | sequence 발급은 개선됐으나 단일 market worker 처리량이 `100 order/s` 기준에 미달 | worker 처리 시간 추가 축소 또는 비동기 주문 접수 분리 검토 |
 
 Severity:
 
@@ -1819,7 +1910,7 @@ Severity:
 - `MAJOR`: 5xx, lock timeout, 반복 가능한 성능 병목
 - `MINOR`: 문서/로그/테스트 안정성 개선
 
-## 29. 후속 조치
+## 30. 후속 조치
 
 | Action | Owner | Status | Link |
 |---|---|---|---|
@@ -1845,5 +1936,5 @@ Severity:
 | Reduce matched order event/ledger write round trips |  | DONE |  |
 | Reduce order transaction hold time |  | PARTIAL |  |
 | Redesign order creation serialization scope |  | DONE |  |
-| Reduce market worker process time |  | TODO |  |
+| Reduce market worker process time |  | PARTIAL |  |
 | Evaluate async order accepted model |  | TODO |  |

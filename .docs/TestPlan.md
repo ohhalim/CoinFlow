@@ -989,7 +989,8 @@ Stage 기준:
 | `command_worker_process` | market worker의 주문 생성 내부 처리 시간 |
 | `client_order_id_check` | client order id 중복 검증 시간 |
 | `self_trade_check` | 자전거래 방지 검증 시간 |
-| `sequence_lock` | market sequence 잠금 및 증가 시간 |
+| `sequence_lock` | DB row lock 기반 market sequence 잠금 및 증가 시간 |
+| `sequence_allocate` | market worker 기준 메모리 sequence 발급 시간 |
 | `taker_wallet_lock` | taker wallet 잠금 시간 |
 | `maker_order_lock` | maker order pessimistic lock 시간 |
 | `settlement_wallet_lock` | 체결 정산 대상 wallet lock 시간 |
