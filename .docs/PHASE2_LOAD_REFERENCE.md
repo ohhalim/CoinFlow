@@ -314,7 +314,8 @@ Kafka/WebSocket exactly-once 전파를 보장합니다.
 
 ### 9-2. v3 고성능 구조 검토
 
-- market별 command queue / worker
+- market별 command queue / worker 완료
+- 비동기 주문 접수 설계
 - order command journal
 - matching result journal
 - DB projection 비동기화
@@ -322,4 +323,5 @@ Kafka/WebSocket exactly-once 전파를 보장합니다.
 - orderbook delta + sequence + snapshot recovery
 - idempotent consumer와 replay/redrive
 
-이 중 지금 바로 구현할 것은 9-1이고, 9-2는 현재 기준선을 마감한 뒤 별도 브랜치/문서에서 진행한다.
+현재 우선순위: [비동기 주문 접수 설계](./design/ASYNC_ORDER_ACCEPTANCE.md) 기준 확정
+구현 단계: 주문 접수 transaction과 market worker 체결/정산 처리 별도 이슈 분리

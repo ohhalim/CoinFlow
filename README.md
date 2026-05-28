@@ -68,7 +68,7 @@ Client subscribers
 | Source of truth | DB의 주문, 체결, 지갑, 원장을 기준 상태로 둡니다. |
 | 인메모리 오더북 | 매칭 후보 조회와 호가 조회를 위한 파생 상태입니다. |
 | 오더북 반영 | DB commit 이후에만 인메모리 오더북을 변경합니다. |
-| 순차 처리 | 같은 시장의 주문 생성/취소는 market별 `ReentrantLock`으로 직렬화합니다. |
+| 순차 처리 | 같은 시장의 주문 생성은 market별 command queue/worker로 순서화하고, 주문 취소와 오더북 반영 경계는 내부 lock으로 보호합니다. |
 | DB 동시성 | sequence, wallet, maker order 갱신에 pessimistic lock을 사용합니다. |
 | 지갑 모델 | `available_balance`와 `locked_balance`를 분리합니다. |
 | 원장 | 모든 지갑 변경을 `wallet_ledgers`에 append-only로 기록합니다. |
@@ -354,17 +354,19 @@ k6 run k6/websocket-kafka-load-test.js
 | [Test Plan](.docs/TestPlan.md) | 핵심 통합 테스트, 동시성 테스트, k6 부하 테스트 계획 |
 | [Test Results](.docs/TEST_RESULTS.md) | 동시성/k6 테스트 실행 결과 |
 | [Order Flow](.docs/ORDER_FLOW.md) | 주문 생성부터 체결/정산/오더북 반영까지의 내부 흐름 |
+| [Async Order Acceptance](.docs/design/ASYNC_ORDER_ACCEPTANCE.md) | 비동기 주문 접수 전환 설계, 상태 전이, 정합성 기준 |
 | [Issues](.docs/ISSUES.md) | Phase 1 이후 코드 리뷰 이슈와 보강 내용 |
 | [Reference](.docs/Reference.md) | 설계 판단 근거와 외부 거래소 API 레퍼런스 |
 
 ## 다음 단계
 
-현재 구현 완료 범위는 Phase 1 거래 코어와 Phase 2 이벤트 기반 외부 전파입니다.
+현재 구현 완료 범위는 Phase 1 거래 코어, Phase 2 이벤트 기반 외부 전파, 단일 market 주문 생성 병목 분리입니다.
 
-- 주문 생성 경로의 market lock 보유 시간 계측
-- DB pessimistic lock 대기 시간과 transaction hold time 분리
+- 비동기 주문 접수 API 설계 확정
+- 주문 접수 transaction과 market worker 체결/정산 처리 분리
+- 비동기 주문 상태 전이와 자산 잠금 정합성 테스트
+- 동기 주문 모델과 비동기 주문 모델의 `100 order/s` 부하 비교
 - WebSocket 연결 인증/권한 분리
-- 매칭 엔진 성능 기준선 측정
 - 정산 Batch 추가
 
 WebSocket 인증/권한 분리와 Batch 정산은 아직 구현 완료 기능으로 표기하지 않습니다.
