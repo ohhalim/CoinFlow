@@ -132,6 +132,16 @@ Market worker
 | 체결 결과 확인 | `GET /api/v1/orders/{id}`, `/topic/trades/{market}` |
 | 호환성 | 기존 동기 API 유지 여부 별도 이슈에서 결정 |
 
+### `#82` 응답 모델 결정
+
+| 항목 | 결정 |
+|---|---|
+| 현재 `POST /api/v1/orders` | 기존 `201 Created` 동기 응답 유지 |
+| 비동기 접수 응답 모델 | `AcceptedOrderResponse` 추가 |
+| 응답 필드 | `orderId`, `clientOrderId`, `market`, `side`, `status`, `acceptedAt` |
+| 체결 결과 | 접수 응답에서 제외 |
+| 실제 `202 Accepted` 전환 | 주문 접수 transaction 분리 이후 |
+
 ## 상태 전이
 
 현재 상태:
@@ -166,8 +176,9 @@ ACCEPTED
 
 검토 사항:
 
-- 현재 `OrderStatus`에 `ACCEPTED`, `REJECTED` 없음
-- 상태 추가 시 기존 조회 API와 테스트 기대값 수정 필요
+- `OrderStatus`에 `ACCEPTED`, `REJECTED` 추가
+- 현재 동기 주문 생성 경로는 `OPEN` 시작 유지
+- `ACCEPTED`, `REJECTED` 실제 사용은 주문 접수 transaction 분리 범위
 - `ACCEPTED` 상태 주문의 오더북 노출 여부 결정 필요
 
 ## 정합성 기준
