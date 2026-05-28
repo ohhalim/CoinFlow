@@ -2,6 +2,8 @@
 
 이 문서는 CoinFlow에서 주문 하나가 생성되고 체결, 정산, 원장 기록, 오더북 반영으로 이어지는 내부 처리 흐름을 설명합니다.
 
+현재 문서는 동기 주문 생성 흐름 기준입니다. 주문 접수 응답과 체결/정산 처리를 분리하는 후속 설계는 [ASYNC_ORDER_ACCEPTANCE.md](./design/ASYNC_ORDER_ACCEPTANCE.md)를 기준으로 합니다.
+
 ## 1. 전체 흐름
 
 ```text

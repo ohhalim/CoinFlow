@@ -37,12 +37,31 @@
 
 - WebSocket 연결 인증/권한 분리
 - 클라이언트 재연결/중복 수신 처리
-- WebSocket/Kafka 실시간 전파 부하 테스트
-- 매칭 엔진 성능 기준선 측정
+- WebSocket/Kafka 실시간 전파 부하 테스트 완료
+- 단일 market 주문 생성 병목 분리 완료
+- 비동기 주문 접수 API 설계
+- 주문 접수 transaction과 market worker 체결/정산 처리 분리
 - delta orderbook streaming, sequence number, checksum
 - WebSocket consumer 별도 서비스 분리
 - DB에 결과를 쓰는 Consumer의 `processed_events` 기반 idempotency
 - 일별 거래 정산 Batch
+
+### Phase 2 이후 설계 범위
+
+단일 market `100 order/s` 부하 기준:
+
+- market별 command queue 적용 후 `market_lock_wait` 주요 병목 제외
+- 잔여 병목: `command_queue_wait`, 단일 market worker 처리량 한계
+
+후속 설계 기준:
+
+| 항목 | 방향 |
+|---|---|
+| 주문 접수 응답 | 체결/정산 완료 대기와 분리 |
+| 체결/정산 처리 | market worker에서 순차 처리 |
+| 상태 조회 | 주문 상태 API와 WebSocket 이벤트 기준 |
+| 정합성 | 자산 잠금, 주문 상태 전이, 원장 기록 기준 유지 |
+| 상세 문서 | [Async Order Acceptance](../design/ASYNC_ORDER_ACCEPTANCE.md) |
 
 ---
 
