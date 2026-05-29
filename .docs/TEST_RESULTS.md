@@ -2025,4 +2025,4 @@ Severity:
 | Reduce market worker process time |  | PARTIAL |  |
 | Evaluate async order accepted model |  | DONE |  |
 | Compare sync 201 and async 202 order load latency |  | DONE |  |
-| Measure async worker completion latency |  | TODO |  |
+| Measure async worker completion latency |  | PLANNED |  |
