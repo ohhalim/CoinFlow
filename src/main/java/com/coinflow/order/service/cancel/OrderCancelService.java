@@ -7,6 +7,7 @@ import com.coinflow.order.domain.Order;
 import com.coinflow.order.dto.CancelOrderResponse;
 import com.coinflow.order.matching.MatchingEngine;
 import com.coinflow.order.repository.OrderRepository;
+import com.coinflow.order.service.lock.MarketOrderLockScope;
 import com.coinflow.order.service.lock.MarketOrderLockService;
 import com.coinflow.wallet.domain.LedgerType;
 import com.coinflow.wallet.domain.Wallet;
@@ -21,7 +22,6 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
-import java.util.concurrent.locks.ReentrantLock;
 
 @Slf4j
 @Service
@@ -58,12 +58,15 @@ public class OrderCancelService {
                 .orElseThrow(() -> new ApiException(ErrorCode.ORDER_NOT_FOUND));
         if (!order.isCancelable()) throw new ApiException(ErrorCode.ORDER_NOT_CANCELABLE);
 
-        ReentrantLock marketLock = marketOrderLockService.getLock(order.getMarketId());
-        marketLock.lock();
+        MarketOrderLockScope marketLockScope = marketOrderLockService.acquire(
+                order.getMarketId(),
+                order.getMarketSymbol(),
+                order.getSide()
+        );
         try {
             return transactionTemplate.execute(status -> cancelInTransaction(currentUserId, orderId));
         } finally {
-            marketLock.unlock();
+            marketLockScope.release();
         }
     }
 
