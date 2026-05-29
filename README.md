@@ -40,6 +40,16 @@
 | 측정 방식 | k6, Prometheus, Grafana로 WebSocket, Kafka, DB connection, market lock, worker queue 병목 후보 분리 |
 | 개선 흐름 | 거래 코어 MVP -> 정합성 테스트 -> Kafka/WebSocket 전파 -> 병목 계측 -> 주문 응답 구조 분리 |
 
+## 정합성 보강
+
+| 대상 | 적용 방식 |
+|---|---|
+| 지갑 잔고 | `WalletRepository.findByUserIdAndAssetWithLock()`의 `PESSIMISTIC_WRITE`로 주문 자산 잠금, 해제, 정산 경합 제어 |
+| 주문 상태 | `OrderRepository.findByIdWithLock()` / `findByIdAndUserIdWithLock()`로 worker, 취소, 실패 보상 간 상태 전이 경합 제어 |
+| 중복 주문 | `(user_id, client_order_id)` 유니크 제약과 사전 조회로 동일 사용자 중복 주문 방어 |
+| 오더북 | 주문/체결 DB 상태 기준으로 재구성 가능한 파생 상태로 관리. 커밋 이후 반영 실패 시 DB 기준 재구성 |
+| 비동기 실패 | worker 실패 시 `REJECTED` 전이, 잠금 자산 해제 원장과 `ORDER_REJECTED` 이벤트 기록 |
+
 ## 성능 개선 요약
 
 | 개선 항목 | Before | After | 개선 작업 |
