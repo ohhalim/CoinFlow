@@ -20,13 +20,13 @@
 |---|---|
 | 구현 대상 | 지정가 주문, 가격-시간 우선 매칭, 체결, 지갑 정산, 원장 기록, 실시간 체결/오더북 전파 |
 | 정합성 기준 | 주문, 체결, 지갑, 원장이 같은 트랜잭션 경계에서 일관된 상태 유지 |
-| 관측 방식 | k6, Prometheus, Grafana로 WebSocket, Kafka, DB connection, market lock, worker queue 병목 후보 분리 |
+| 측정 방식 | k6, Prometheus, Grafana로 WebSocket, Kafka, DB connection, market lock, worker queue 병목 후보 분리 |
 | 개선 흐름 | 거래 코어 MVP -> 정합성 테스트 -> Kafka/WebSocket 전파 -> 병목 계측 -> 주문 응답 구조 분리 |
 | 잔여 한계 | `202 Accepted` 전환 이후에도 worker backlog와 단일 market worker 처리량 한계 잔여 |
 
 ## 성능 개선 요약
 
-| 개선 항목 | Before | After | 판단 |
+| 개선 항목 | Before | After | 개선 작업 |
 |---|---:|---:|---|
 | WebSocket trade feed p95 | `14.49s` | `250ms` | Outbox/Kafka 발행 cadence와 WebSocket 전파 경로 개선 |
 | OrderBook broadcast max | `2.4019s` | `4.44ms` | 오더북 snapshot 생성의 주문 생성 market lock 의존 제거 |
@@ -43,7 +43,7 @@
 
 ## 병목 분석 흐름
 
-| 단계 | 관측값 | 조치 | 결과 |
+| 단계 | 측정 결과 | 개선 작업 | 결과 |
 |---|---|---|---|
 | 거래 정합성 기준선 | 동시 주문/체결/취소 경합 | 통합 테스트와 공통 정합성 검증 추가 | 잔고 음수, 초과 체결, 오더북 복구 검증 |
 | 실시간 체결 전파 | trade feed p95 `14.49s` | Outbox 발행 주기/batch 조정, WebSocket executor 설정 | p95 `250ms` |
@@ -94,7 +94,7 @@ sequenceDiagram
 - zero-quote 체결, dust maker 잔량, 오더북 반영 실패 후 복구 경로
 - 동일 사용자 동시 주문, 단일 maker 주문 다중 taker 체결, 주문 취소/체결 경합
 
-조치:
+개선 작업:
 
 - 지갑 잔고 음수 방지 검증을 공통 정합성 유틸로 분리
 - 주문/체결/취소 후 `wallets`, `orders`, `trades`, `wallet_ledgers` 상태 동시 검증
@@ -109,13 +109,13 @@ sequenceDiagram
 
 ### 2. WebSocket/Kafka 실시간 전파 병목 개선
 
-관측값:
+측정 결과:
 
 - `50 subscribers / 50 order/s` 조건에서 WebSocket trade feed p95 `14.49s`
 - 테스트 종료 시점 Outbox backlog `0`, Kafka consumer lag `0`
 - 지연 구간 후보: Kafka Consumer 이후 WebSocket broadcast 경로
 
-조치:
+개선 작업:
 
 - k6 WebSocket/STOMP 부하 테스트 추가
 - `/topic/trades/{market}`, `/topic/orderbook/{market}` 수신 여부와 trade delivery lag 측정
@@ -135,7 +135,7 @@ sequenceDiagram
 
 ### 3. 오더북 브로드캐스트 락 경합 개선
 
-관측값:
+측정 결과:
 
 - `50 subscribers / 100 order/s` 조건에서 `orderbook broadcast duration` max `2.40s`
 - 동일 구간 Order API latency max `2.49s`
@@ -146,7 +146,7 @@ Before:
 
 ![Before orderbook broadcast lock contention](.docs/images/before-orderbook-lock-contention.png)
 
-조치:
+개선 작업:
 
 - WebSocket 오더북 브로드캐스트의 `OrderService` market lock 의존 제거
 - `MemoryOrderBook` synchronized snapshot API 추가
@@ -171,7 +171,7 @@ After:
 | 5xx | `0` | `0` |
 | Order API latency max | `2.49s` | `3.11s` |
 
-판단:
+결과 분석:
 
 - 오더북 브로드캐스트 락 경합 제거
 - Order API latency max `3.11s` 잔여
@@ -179,13 +179,13 @@ After:
 
 ### 4. 주문 생성 경로 병목 재분석
 
-관측값:
+측정 결과:
 
 - 오더북 브로드캐스트 락 경합 제거 이후에도 `50 subscribers / 100 order/s` 조건에서 Order API latency 잔여
 - Kafka/WebSocket 병목과 주문 생성 병목의 추가 분리 필요
 - 분리 대상: `market_lock_wait`, `transaction_template`, DB lock, 오더북 반영 시간
 
-관측 방법:
+측정 방법:
 
 - 주문 생성 내부 구간 Micrometer timer 추가
 - `clientOrderId` 사전 중복 조회를 market lock 밖으로 이동
@@ -218,7 +218,7 @@ After:
 | `transaction_template` max | `55.996ms` | `3.7715s` |
 | `total` max | `3.0575s` | `5.1223s` |
 
-판단:
+결과 분석:
 
 - `market_lock_wait max`: `3.0458s -> 397.38ms`
 - 실제 주문 처리량: `56.56 order/s -> 76.80 order/s`
@@ -228,7 +228,7 @@ After:
 
 ### 5. 비동기 주문 접수 전환 - HTTP 응답 대기와 worker 완료 대기 분리
 
-관측값:
+측정 결과:
 
 - 동기 주문 생성 API 응답 범위: 잔고 잠금, 매칭, 체결 저장, 지갑 정산, 원장 저장, 이벤트 저장
 - market별 command queue 도입 이후 `market_lock_wait` 주요 병목 제외
@@ -239,7 +239,7 @@ Sync 201:
 
 ![Sync order load 201](.docs/images/sync-order-load-201.png)
 
-조치:
+개선 작업:
 
 - `POST /api/v1/orders/async` 경로 추가
 - 주문 접수 transaction 이후 `202 Accepted` 반환
@@ -276,7 +276,7 @@ Async 202:
 | `command_queue_wait` avg | BUY `24.65ms`, SELL `21.79ms` |
 | `command_worker_process` avg | BUY `3.60ms`, SELL `12.74ms` |
 
-판단:
+결과 분석:
 
 - HTTP 응답 p95: `1.43s -> 16.34ms`
 - dropped iteration: `255 -> 0`
@@ -287,13 +287,13 @@ Async 202:
 
 ### 1. 성능 테스트 측정값 왜곡 방지
 
-관측값:
+측정 결과:
 
 - 앱 재기동 직후 Kafka/Outbox backlog 잔존 가능
 - 첫 실행 `ws_trade_delivery_lag` 측정값 왜곡 가능
 - 셸 환경 `DEBUG=release`로 Spring Boot debug logging 활성화 가능
 
-조치:
+개선 작업:
 
 - `DEBUG=false` 기준 애플리케이션 재기동 후 측정
 - 테스트 종료 시점 Outbox unpublished event와 Kafka consumer lag 확인
