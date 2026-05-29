@@ -283,8 +283,6 @@ Async 202:
 - 개선 범위: worker 처리량 자체 개선이 아니라 HTTP 응답 대기와 worker 완료 대기 분리
 - 잔여 병목: worker backlog, 단일 market worker 처리량 한계
 
-상세 실행 결과: [Test Results](.docs/TEST_RESULTS.md)
-
 ## 트러블 슈팅
 
 ### 1. 성능 테스트 측정값 왜곡 방지
