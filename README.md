@@ -56,6 +56,7 @@
 
 - 개선 단계별 동일 시나리오 비교
 - async 202 비교 조건: `50 WebSocket subscribers / 100 order/s / 5m / DB pool 20`
+- 부하 환경: 로컬 Spring Boot 단일 인스턴스, Docker Compose MySQL 8, Kafka single broker
 
 ## 병목 분석 흐름
 
@@ -70,13 +71,24 @@
 
 ## 설계 판단
 
-| 판단 지점 | 선택 | 근거 |
-|---|---|---|
-| 주문 응답 범위 | 기존 `201 Created` API 유지, 신규 `202 Accepted` 접수 경로 추가 | 기존 동기 응답 계약을 유지하면서 worker 완료 대기를 HTTP 응답에서 분리. 동일 조건에서 주문 응답 p95 `1.43s -> 16.34ms`, dropped iterations `255 -> 0` |
-| 접수 transaction과 worker 분리 | 접수 transaction은 주문 검증, 자산 잠금, `ACCEPTED` 주문 저장, 원장/이벤트 기록까지만 담당 | `afterCommit` 이후 queue 등록으로 worker가 커밋된 주문만 처리. queue 등록 누락/지연 시 `ACCEPTED` 주문 재조회 후 requeue |
-| worker 실패 처리 | 처리 실패 시 `ACCEPTED` 주문을 `REJECTED`로 전이하고 locked asset 해제 원장 기록 | 비동기 처리 실패 후 사용자 자산이 잠긴 상태로 남는 경우 방지 |
-| 오더북 broadcast | WebSocket snapshot 생성에서 `OrderService` market lock 의존 제거 | Kafka lag, Hikari pending, HTTP 5xx가 `0`인 조건에서 broadcast duration max `2.4019s` 관측. 오더북 내부 snapshot으로 복사 범위를 제한한 뒤 max `4.44ms` |
-| Outbox/Kafka 전파 | 주문 transaction은 domain event 저장까지만 수행하고 Kafka 발행은 Outbox Publisher가 담당 | Kafka/WebSocket 전파 실패가 주문 저장 transaction을 직접 지연시키지 않도록 분리. 측정 시 Kafka consumer lag `0` 기준으로 병목 후보 제외 |
+| 판단 지점 | 선택 | 제외한 선택지 | 근거 |
+|---|---|---|---|
+| 주문 응답 범위 | 기존 `201 Created` 유지, 신규 `202 Accepted` 접수 경로 추가 | 기존 동기 API를 바로 비동기로 변경 | 기존 응답 계약 변경 범위를 분리하고, 같은 조건에서 sync/async 응답 지연을 비교. 주문 응답 p95 `1.43s -> 16.34ms`, dropped iterations `255 -> 0` |
+| 접수 transaction과 worker 분리 | 접수 transaction은 검증, 자산 잠금, `ACCEPTED` 저장, 원장/이벤트 기록까지만 담당 | HTTP 요청 안에서 매칭/체결/정산까지 완료 | `100 order/s` 조건에서 HTTP 응답이 worker queue 대기 시간에 영향. `afterCommit` 이후 queue 등록으로 커밋된 주문만 worker가 처리 |
+| market별 주문 순서 | market별 `BlockingQueue`와 전용 worker로 직렬 처리 | 공용 executor에서 주문별 병렬 처리 | 같은 market의 가격-시간 우선 순서 보장 필요. queue depth와 `command_queue_wait`를 계측해 처리량 한계를 별도 지표로 분리 |
+| worker 실패 처리 | 실패 시 `REJECTED` 전이, locked asset 해제 원장 기록 | 실패 주문을 `ACCEPTED` 상태로 유지 | 비동기 처리 실패 후 사용자 자산이 잠긴 상태로 남는 경우 방지. queue 등록 누락/지연은 `ACCEPTED` 주문 재조회 후 requeue |
+| 오더북 broadcast | WebSocket snapshot 생성에서 `OrderService` market lock 의존 제거 | broadcast 시 주문 서비스 조회 경로 재사용 | Kafka lag, Hikari pending, HTTP 5xx가 `0`인 조건에서 broadcast duration max `2.4019s` 관측. 오더북 내부 snapshot으로 복사 범위를 제한한 뒤 max `4.44ms` |
+| Outbox/Kafka 전파 | 주문 transaction은 domain event 저장, Kafka 발행은 Outbox Publisher가 담당 | 주문 transaction 내부 Kafka 발행, CDC 기반 전파 | Kafka 발행 실패가 주문 저장 transaction을 직접 지연시키지 않도록 분리. CDC는 도메인 이벤트 타입/market key를 애플리케이션에서 명시해야 하는 현재 구조와 범위가 맞지 않아 제외 |
+
+## 정합성 보장 방식
+
+| 대상 | 적용 방식 |
+|---|---|
+| 지갑 잔고 | `WalletRepository.findByUserIdAndAssetWithLock()`의 `PESSIMISTIC_WRITE`로 자산 잠금 후 잔고 차감/잠금 원장 기록 |
+| 주문 상태 | `OrderRepository.findByIdWithLock()`의 `PESSIMISTIC_WRITE`로 worker, 취소, 보상 처리 간 상태 전이 경합 제어 |
+| 중복 주문 | `(user_id, client_order_id)` unique constraint와 사전 조회를 함께 사용. DB constraint 위반은 중복 주문 오류로 매핑 |
+| 오더북 상태 | DB 주문/체결 상태를 기준으로 재구성 가능한 파생 상태로 정의. `afterCommit` 이후 인메모리 오더북 반영, 실패 시 DB 기준 rebuild |
+| 비동기 접수 | `ACCEPTED` 주문 저장과 자산 잠금은 같은 transaction에서 처리. worker 실패 시 `REJECTED` 전이와 locked asset 해제 원장 기록 |
 
 ## 비동기 주문 처리 시퀀스
 
@@ -314,6 +326,7 @@ Async 202:
 - `202 Accepted` 전환은 HTTP 응답 대기와 worker 완료 대기 분리이며, worker 처리량 자체 개선은 아님
 - 잔여 지표: `order.command.queue.depth` max `58`, `command_queue_wait` max 약 `0.68s`
 - 추가 검증 대상: worker 처리 시간과 queue depth 상관관계, 단일 market worker 처리량 한계
+- 다음 검토 방향: market별 queue backlog 기준선 정리, hot market 분산 기준 검토, in-memory matching / async persistence 전환 기준 문서화
 
 ## 트러블 슈팅
 
@@ -330,6 +343,16 @@ Async 202:
 - `DEBUG=false` 기준 애플리케이션 재기동 후 측정
 - 테스트 종료 시점 Outbox unpublished event와 Kafka consumer lag 확인
 - k6 summary, Prometheus scrape 원본, Grafana 캡처 대조
+
+## 기술 선택 기준
+
+| 기술 | 선택 이유 |
+|---|---|
+| Kafka | 주문 transaction과 WebSocket fan-out 분리, consumer lag 기반 전파 병목 확인 |
+| Outbox | 주문/체결 저장과 이벤트 기록을 같은 DB transaction에 묶고, Kafka 발행 실패는 재시도 대상으로 분리 |
+| Testcontainers MySQL | wallet/order pessimistic lock, transaction rollback, unique constraint 동작을 실제 MySQL 기준으로 검증 |
+| Embedded Kafka | Outbox -> Kafka -> WebSocket consumer 경로를 로컬 통합 테스트에서 검증 |
+| k6 / Prometheus / Grafana | HTTP latency, WebSocket 수신 지연, Kafka lag, Hikari pool, stage metric을 같은 부하 구간에서 대조 |
 
 ## 기술 스택
 
