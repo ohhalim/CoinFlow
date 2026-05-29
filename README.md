@@ -1,15 +1,17 @@
 # CoinFlow
 
-단일 market 주문 처리 경로에서 WebSocket broadcast, market lock, worker queue 병목을 단계적으로 분리한 거래소 백엔드 프로젝트입니다. k6/Prometheus/Grafana 기반 부하 테스트로 병목 후보를 좁히고, 오더북 broadcast lock 의존 제거와 `202 Accepted` 비동기 접수 전환으로 주문 응답 p95를 `1.43s -> 16.34ms`까지 낮췄습니다.
+지정가 주문, 가격-시간 우선 매칭, 체결, 지갑 정산, 원장 기록, 실시간 체결/오더북 전파를 구현한 거래소 백엔드 프로젝트입니다.
+
+단일 market 주문 처리 경로에서 WebSocket broadcast, market lock, worker queue 병목을 단계적으로 분리했습니다. k6/Prometheus/Grafana 기반 부하 테스트로 병목 후보를 좁히고, 오더북 broadcast lock 의존 제거와 `202 Accepted` 비동기 접수 전환으로 주문 응답 p95를 `1.43s -> 16.34ms`까지 낮췄습니다.
 
 ## 핵심 결과
 
-| 지표 | Before | After | 확인 내용 |
-|---|---:|---:|---|
-| 주문 응답 p95 | `1.43s` | `16.34ms` | worker 완료 대기와 HTTP 응답 대기 분리 |
-| OrderBook broadcast max | `2.4019s` | `4.44ms` | broadcast 경로의 market lock 의존 제거 |
-| WebSocket trade feed p95 | `14.49s` | `250ms` | Outbox/Kafka 발행 cadence와 WebSocket executor 조정 |
-| 실제 주문 처리량 | `56.56 order/s` | `76.80 order/s` | 주문 생성 lock 범위 축소 |
+| 지표 | 부하 조건 | Before | After | 확인 내용 |
+|---|---|---:|---:|---|
+| 주문 응답 p95 | `100 order/s / 5m` | `1.43s` | `16.34ms` | worker 완료 대기와 HTTP 응답 대기 분리 |
+| OrderBook broadcast max | `100 order/s / 5m` | `2.4019s` | `4.44ms` | broadcast 경로의 market lock 의존 제거 |
+| WebSocket trade feed p95 | `50 order/s` | `14.49s` | `250ms` | Outbox/Kafka 발행 cadence와 WebSocket executor 조정 |
+| 실제 주문 처리량 | `100 order/s / 5m` | `56.56 order/s` | `76.80 order/s` | 주문 생성 lock 범위 축소 |
 
 ## 문제 접근
 
@@ -112,7 +114,7 @@ sequenceDiagram
 
 ### 1. 거래 정합성 보강
 
-검증 대상:
+확인 범위:
 
 - 주문/체결/취소 경계에서 지갑, 주문, 체결, 원장 상태 일관성
 - zero-quote 체결, dust maker 잔량, 오더북 반영 실패 후 복구 경로
