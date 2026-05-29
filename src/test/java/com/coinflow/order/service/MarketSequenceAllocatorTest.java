@@ -3,6 +3,7 @@ package com.coinflow.order.service;
 import com.coinflow.order.domain.OrderSequence;
 import com.coinflow.order.repository.OrderRepository;
 import com.coinflow.order.repository.OrderSequenceRepository;
+import com.coinflow.order.service.support.MarketSequenceAllocator;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;

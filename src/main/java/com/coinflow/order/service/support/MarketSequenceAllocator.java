@@ -1,4 +1,4 @@
-package com.coinflow.order.service;
+package com.coinflow.order.service.support;
 
 import com.coinflow.order.domain.OrderSequence;
 import com.coinflow.order.repository.OrderRepository;

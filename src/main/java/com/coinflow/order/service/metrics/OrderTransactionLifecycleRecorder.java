@@ -1,4 +1,4 @@
-package com.coinflow.order.service;
+package com.coinflow.order.service.metrics;
 
 import com.coinflow.order.domain.OrderSide;
 import org.springframework.stereotype.Component;
