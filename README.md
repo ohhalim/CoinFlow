@@ -14,17 +14,7 @@
 | Storage | MySQL에 주문, 체결, 지갑, 원장, 도메인 이벤트 기록 |
 | Event / Realtime | Outbox, Kafka, WebSocket STOMP 기반 체결/오더북 전파 |
 
-핵심 설계:
-
-| 주제 | 설계 |
-|---|---|
-| Source of truth | DB의 주문, 체결, 지갑, 원장을 기준 상태로 사용 |
-| 파생 상태 | 인메모리 오더북은 DB 기준으로 재구성 가능한 조회/매칭 상태 |
-| 순차 처리 | 같은 market 주문은 command queue와 worker로 순서화 |
-| 외부 전파 | DB commit 이후 outbox 이벤트를 Kafka와 WebSocket으로 전파 |
-| 비동기 접수 | `/api/v1/orders/async`는 접수 transaction 이후 `202 Accepted` 반환 |
-
-## 프로젝트 개요
+## 구현 및 검증 기준
 
 | 항목 | 내용 |
 |---|---|
@@ -310,31 +300,6 @@ Async 202:
 - `DEBUG=false` 기준 애플리케이션 재기동 후 측정
 - 테스트 종료 시점 Outbox unpublished event와 Kafka consumer lag 확인
 - k6 summary, Prometheus scrape 원본, Grafana 캡처 대조
-
-## 문서
-
-| 문서 | 설명 |
-|---|---|
-| [Features](.docs/FEATURES.md) | 상세 기능, 검증 범위, 구현/제외 범위 |
-| [Next Steps](.docs/NEXT_STEPS.md) | 후속 작업 후보, 우선순위, 완료 기능으로 표기하지 않는 범위 |
-| [PRD](.docs/PRD.md) | MVP 제품 범위, 포함/제외 기준, 성공 기준 |
-| [Plan](.docs/Plan.md) | MVP 구현 순서와 설계 원칙 |
-| [Phase 2 PRD](.docs/v2/PRD.md) | Kafka/Outbox/WebSocket 외부 전파 범위와 완료 상태 |
-| [Phase 2 Plan](.docs/v2/Plan.md) | Phase 2 구현 계획, 실제 이슈 번호, 후속 범위 |
-| [API](.docs/API.md) | REST API 계약과 에러 코드 |
-| [ERD](.docs/ERD.md) | 테이블 구조와 관계 |
-| [Test Plan](.docs/TestPlan.md) | 핵심 통합 테스트, 동시성 테스트, k6 부하 테스트 계획 |
-| [Test Results](.docs/TEST_RESULTS.md) | 동시성/k6 테스트 실행 결과 |
-| [Order Flow](.docs/ORDER_FLOW.md) | 주문 생성부터 체결/정산/오더북 반영까지의 내부 흐름 |
-| [Async Order Acceptance](.docs/design/ASYNC_ORDER_ACCEPTANCE.md) | 비동기 주문 접수 전환 설계, 상태 전이, 정합성 기준 |
-| [Issues](.docs/ISSUES.md) | Phase 1 이후 코드 리뷰 이슈와 보강 내용 |
-| [Reference](.docs/Reference.md) | 설계 판단 근거와 외부 거래소 API 레퍼런스 |
-
-## 다음 단계
-
-현재 완료 범위는 거래 코어, 이벤트 기반 외부 전파, 단일 market 병목 분리, 비동기 주문 접수 응답 분리까지입니다.
-
-후속 작업은 [Next Steps](.docs/NEXT_STEPS.md)에 분리해 관리합니다.
 
 ## 기술 스택
 
