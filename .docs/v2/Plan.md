@@ -21,6 +21,8 @@
 | `#38` | `feat/38/websocket-trade-feed` | Kafka Consumer 기반 WebSocket 체결 feed | WebSocket unit test, Embedded Kafka integration test |
 | `#40` | `feat/40/websocket-stomp-e2e` | 실제 STOMP client 수신 E2E | `WebSocketStompE2eTest` |
 | `#42` | `feat/42/websocket-orderbook` | Kafka 주문 이벤트 기반 오더북 snapshot broadcast | `OrderBookBroadcasterTest`, `WebSocketOrderBookBroadcastIntegrationTest` |
+| `#88` | `feat/88/async-order-acceptance` | `202 Accepted` 비동기 주문 접수, worker 처리, 실패 보상, ACCEPTED 복구 | 비동기 주문 상태 전이/정합성 테스트 |
+| `#90` | `test/90/async-order-load-comparison` | sync 201 / async 202 동일 조건 부하 비교 | k6, Grafana, `TEST_RESULTS.md` |
 
 최종 회귀 검증은 `./gradlew test` 기준 `150`개 테스트 통과로 기록했다. 자세한 실행 결과는 [TEST_RESULTS.md](../TEST_RESULTS.md)를 기준으로 한다.
 
@@ -32,6 +34,10 @@
 - Kafka `TRADE_CREATED` 이벤트를 `/topic/trades/{market}`로 broadcast한다.
 - 실제 STOMP client가 `/topic/trades/BTC-KRW` 메시지를 수신하는 경로를 검증했다.
 - Kafka 주문 이벤트를 받아 현재 인메모리 오더북 snapshot을 `/topic/orderbook/{market}`로 broadcast한다.
+- `POST /api/v1/orders/async`는 주문 접수 transaction 이후 `202 Accepted`를 반환한다.
+- 비동기 주문은 `ACCEPTED` 상태로 저장한 뒤 market worker에서 매칭/정산 처리한다.
+- worker 실패 시 `REJECTED` 상태 전이와 locked asset 해제 보상을 수행한다.
+- 오래된 `ACCEPTED` 주문은 recovery scheduler로 재등록한다.
 
 ### Phase 2 제외 및 후속 범위
 
@@ -39,8 +45,6 @@
 - 클라이언트 재연결/중복 수신 처리
 - WebSocket/Kafka 실시간 전파 부하 테스트 완료
 - 단일 market 주문 생성 병목 분리 완료
-- 비동기 주문 접수 API 설계
-- 주문 접수 transaction과 market worker 체결/정산 처리 분리
 - delta orderbook streaming, sequence number, checksum
 - WebSocket consumer 별도 서비스 분리
 - DB에 결과를 쓰는 Consumer의 `processed_events` 기반 idempotency
@@ -51,16 +55,25 @@
 단일 market `100 order/s` 부하 기준:
 
 - market별 command queue 적용 후 `market_lock_wait` 주요 병목 제외
-- 잔여 병목: `command_queue_wait`, 단일 market worker 처리량 한계
+- sequence lock 제거 후 `command_worker_process` 평균 `14.35ms -> 9.73ms` 감소
+- async 202 전환 후 HTTP 응답 p95 `1.43s -> 16.34ms` 감소
+- dropped iteration `255 -> 0` 감소
+- 잔여 worker 지표
+  - `order.command.queue.depth` max `58`
+  - `command_queue_wait` max 약 `0.68s`
+- 잔여 병목: worker backlog, 단일 market worker 처리량 한계
 
 후속 설계 기준:
 
 | 항목 | 방향 |
 |---|---|
-| 주문 접수 응답 | 체결/정산 완료 대기와 분리 |
+| 주문 접수 응답 | `202 Accepted` 기준으로 체결/정산 완료 대기와 분리 |
 | 체결/정산 처리 | market worker에서 순차 처리 |
 | 상태 조회 | 주문 상태 API와 WebSocket 이벤트 기준 |
 | 정합성 | 자산 잠금, 주문 상태 전이, 원장 기록 기준 유지 |
+| 다음 코드 정리 | 주문 생성 흐름 OOP 리팩토링 |
+| 다음 측정 | 비동기 주문 처리 완료 latency, worker backlog 기준선 |
+| 장기 구조 | in-memory matching / async persistence 전환 기준 문서화 |
 | 상세 문서 | [Async Order Acceptance](../design/ASYNC_ORDER_ACCEPTANCE.md) |
 | 병목 분석 | [Worker DB I/O Analysis](../design/WORKER_DB_IO_ANALYSIS.md) |
 

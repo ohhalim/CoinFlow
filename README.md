@@ -1,17 +1,52 @@
 # CoinFlow
 
-개발 사이클에 맞춰 거래 정합성과 실시간 전파 성능을 검증한 암호화폐 거래소 코어 백엔드 프로젝트입니다.
+거래 정합성을 우선한 암호화폐 거래소 코어를 구현하고, k6/Prometheus/Grafana 기반 부하 테스트로 Kafka/WebSocket 전파와 주문 생성 병목을 단계적으로 분리한 백엔드 프로젝트입니다.
 
 ## 프로젝트 개요
 
 | 항목 | 내용 |
 |---|---|
 | 주제 | 지정가 주문, 가격-시간 우선 매칭, 체결, 지갑 정산, 원장 기록, 실시간 체결/오더북 전파를 구현한 거래소 코어 백엔드 |
-| 목표 | 주문과 자산 정합성을 유지하면서 Kafka/WebSocket 기반 외부 전파 경로의 병목을 측정하고 개선 |
-| 개발 프로세스 | Phase 1 거래 코어 MVP 구축 -> 정합성/동시성 테스트 보강 -> Phase 2 Outbox/Kafka/WebSocket 도입 -> k6/Grafana 기반 병목 분석과 개선 |
-| 핵심 관점 | 기능 구현보다 돈, 잔고, 주문, 체결 상태가 깨지지 않는 구조와 측정 가능한 개선 과정을 우선 |
+| 목표 | 주문과 자산 정합성 유지, 실시간 전파 지연 감소, 단일 market 주문 생성 병목 분리 |
+| 개발 프로세스 | 거래 코어 MVP 구축 -> 정합성/동시성 테스트 보강 -> Outbox/Kafka/WebSocket 도입 -> k6/Grafana 병목 분석 -> 주문 응답 구조 분리 |
+| 핵심 관점 | 잔고, 주문, 체결, 원장 상태가 깨지지 않는 구조와 측정 가능한 개선 과정 |
 
-CoinFlow는 단일 인스턴스 환경에서 주문 생성부터 체결, 지갑 정산, 원장 기록까지 검증합니다. 주문이 체결될 때 `orders`, `trades`, `wallets`, `wallet_ledgers`, `domain_events`가 같은 트랜잭션 경계 안에서 일관되게 기록되는 것을 목표로 합니다.
+CoinFlow는 단일 인스턴스 환경에서 주문 생성부터 체결, 지갑 정산, 원장 기록까지 검증합니다. 주문이 체결될 때 `orders`, `trades`, `wallets`, `wallet_ledgers`, `domain_events`가 같은 트랜잭션 경계 안에서 일관되게 기록되도록 설계했습니다.
+
+## 핵심 어필 포인트
+
+| 영역 | 내용 |
+|---|---|
+| 거래 정합성 | 주문, 체결, 지갑, 원장을 하나의 기준 상태로 관리하고 동시성/취소/복구 테스트로 검증 |
+| 실시간 전파 | Outbox, Kafka, WebSocket STOMP 기반 체결/오더북 전파 경로 구현 |
+| 병목 분석 | k6, Prometheus, Grafana 지표로 WebSocket, Kafka, DB connection, market lock, worker queue 병목 후보 분리 |
+| 성능 개선 | trade feed p95, orderbook broadcast, market lock wait, sync/async 주문 응답 지연을 단계별 개선 |
+| 한계 인식 | `202 Accepted` 전환 이후에도 worker backlog가 남는 구조를 문서화하고 in-memory matching / async persistence 전환 기준 정리 |
+
+## 성능 개선 요약
+
+| 개선 항목 | Before | After | 판단 |
+|---|---:|---:|---|
+| WebSocket trade feed p95 | `14.49s` | `250ms` | Outbox/Kafka 발행 cadence와 WebSocket 전파 경로 개선 |
+| OrderBook broadcast max | `2.4019s` | `4.44ms` | 오더북 snapshot 생성의 주문 생성 market lock 의존 제거 |
+| `market_lock_wait` max | `3.0458s` | `397.38ms` | 주문 생성 lock 범위 축소 |
+| 실제 주문 처리량 | `56.56 order/s` | `76.80 order/s` | 주문 생성 lock 경합 완화 |
+| market worker 처리 평균 | `14.35ms` | `9.73ms` | DB row lock 기반 sequence 발급 제거 |
+| 주문 응답 p95 | `1.43s` | `16.34ms` | sync 201 완료 응답을 async 202 접수 응답으로 분리 |
+| dropped iterations | `255` | `0` | async 202 동일 조건 부하 기준 |
+
+측정 조건은 각 개선 단계별 동일 시나리오를 기준으로 분리했습니다. 대표적으로 async 202 비교는 `50 WebSocket subscribers / 100 order/s / 5m / DB pool 20` 조건에서 수행했습니다.
+
+## 병목 분석 흐름
+
+| 단계 | 관측값 | 조치 | 결과 |
+|---|---|---|---|
+| 거래 정합성 기준선 | 동시 주문/체결/취소 경합 | 통합 테스트와 공통 정합성 검증 추가 | 잔고 음수, 초과 체결, 오더북 복구 검증 |
+| 실시간 체결 전파 | trade feed p95 `14.49s` | Outbox 발행 주기/batch 조정, WebSocket executor 설정 | p95 `250ms` |
+| 오더북 broadcast | broadcast max `2.4019s` | market lock 의존 제거, 오더북 내부 snapshot API 추가 | max `4.44ms` |
+| 주문 생성 lock 경합 | `market_lock_wait` max `3.0458s` | lock 범위 축소, stage metric 추가 | max `397.38ms` |
+| 단일 market worker 한계 | queue depth 증가, worker 평균 처리 `9.73ms` | sequence DB lock 제거, command queue 지표화 | 처리량 일부 개선, backlog 잔여 |
+| HTTP 응답 대기 | sync p95 `1.43s` | `202 Accepted` 비동기 주문 접수 경로 추가 | async p95 `16.34ms` |
 
 ## 기술 스택
 
@@ -34,30 +69,37 @@ Client
   | REST API
   v
 Spring MVC Controller
-  |
-  v
-OrderService / WalletService
-  |
-  v
+  | POST /orders          | POST /orders/async
+  | sync 201              | async 202
+  v                       v
+OrderService          AcceptedOrderService
+  |                       |
+  |                       v
+  |                 ACCEPTED order + asset lock
+  |                       |
+  +-----------+-----------+
+              v
+      Market Command Queue
+              |
+              v
+      Market Worker per market
+              |
+              v
 MatchingEngine + in-memory OrderBook
-  |
-  v
+              |
+              v
 MySQL
   | orders / trades / wallets / wallet_ledgers / domain_events
-  v
-Outbox Publisher
-  |
-  v
-Kafka
-  |
-  v
-Kafka Consumer
-  |
-  v
+              |
+              v
+Outbox Publisher -> Kafka -> Kafka Consumer
+              |
+              v
 WebSocket STOMP topics
   | /topic/trades/{market}
   | /topic/orderbook/{market}
-  v
+              |
+              v
 Client subscribers
 ```
 
@@ -73,12 +115,14 @@ Client subscribers
 | 지갑 모델 | `available_balance`와 `locked_balance`를 분리합니다. |
 | 원장 | 모든 지갑 변경을 `wallet_ledgers`에 append-only로 기록합니다. |
 | 이벤트 | `domain_events`를 outbox로 사용해 DB commit 이후 Kafka로 발행합니다. |
+| 비동기 접수 | `/api/v1/orders/async`는 접수 transaction 이후 `202 Accepted`를 반환하고, worker 완료는 상태 조회와 WebSocket 이벤트로 확인합니다. |
 
 ## 핵심 기능
 
 ### 1. 주문, 매칭, 정산 코어
 
 - 지정가 `BUY` / `SELL` 주문 생성
+- `201 Created` 동기 주문 생성과 `202 Accepted` 비동기 주문 접수
 - 가격 우선, 시간 우선 매칭
 - 부분 체결, 완전 체결
 - 주문 취소
@@ -86,6 +130,7 @@ Client subscribers
 - 체결 시 buyer/seller 지갑 정산
 - BUY taker 가격 차이 환불
 - append-only 지갑 원장 기록
+- worker 실패 시 `REJECTED` 상태 전이와 locked asset 해제
 - 서버 시작 시 DB의 미체결 주문으로 인메모리 오더북 초기화
 
 ### 2. 조회 API
@@ -250,6 +295,61 @@ After:
 - Kafka consumer lag, HTTP 5xx, WebSocket/STOMP error는 모두 0으로 유지됐습니다.
 - 후속 병목은 `transaction_template max 3.7715s`로 이동했으며, 주문 생성 트랜잭션 점유 시간과 DB connection pool 대기 가능성을 다음 개선 범위로 분리했습니다.
 
+### 5. 비동기 주문 접수 전환 - HTTP 응답 대기와 worker 완료 대기 분리
+
+문제 상황:
+
+- 동기 주문 생성 API는 잔고 잠금, 매칭, 체결 저장, 지갑 정산, 원장 저장, 이벤트 저장까지 완료한 뒤 `201 Created`를 반환했습니다.
+- market별 command queue 도입 이후 `market_lock_wait`는 제거됐지만, `100 order/s` 유입 조건에서 HTTP 응답이 worker queue 대기에 묶였습니다.
+- Hikari pending, Kafka consumer lag, HTTP 5xx, WebSocket/STOMP error는 주요 병목 후보에서 제외됐습니다.
+
+Sync 201:
+
+![Sync order load 201](.docs/images/sync-order-load-201.png)
+
+해결 방법:
+
+- `POST /api/v1/orders/async` 경로를 추가해 주문 접수 transaction 이후 `202 Accepted`를 반환하도록 분리했습니다.
+- 접수 transaction은 주문 검증, 자산 잠금, `ACCEPTED` 주문 저장, 원장 기록을 담당합니다.
+- market worker는 접수된 주문을 순차 처리하며, 매칭/체결/정산/이벤트 저장을 계속 담당합니다.
+- worker 실패 시 `REJECTED` 상태 전이와 locked asset 해제 보상 흐름을 추가했습니다.
+- 기존 `POST /api/v1/orders` 동기 API는 `201 Created` 응답 계약을 유지했습니다.
+
+Async 202:
+
+![Async order load 202](.docs/images/async-order-load-202.png)
+
+전후 비교:
+
+| Metric | Sync 201 | Async 202 |
+|---|---:|---:|
+| Scenario | `50 subscribers / 100 order/s / 5m` | `50 subscribers / 100 order/s / 5m` |
+| Endpoint | `/api/v1/orders` | `/api/v1/orders/async` |
+| Successful order requests | `29,746` | `30,000` |
+| k6 reported throughput | `90.62/s` | `91.42/s` |
+| Dropped iterations | `255` | `0` |
+| Order response p95 / p99 / max | `1.43s` / `1.79s` / `2.11s` | `16.34ms` / `27.16ms` / `278.35ms` |
+| Trade delivery lag p95 / p99 / max | `524ms` / `727ms` / `1.02s` | `543ms` / `726ms` / `932ms` |
+| HTTP failed / 5xx | `0.00%` / `0` | `0.00%` / `0` |
+| WebSocket / STOMP errors | `0` | `0` |
+| Kafka consumer lag | `0` | `0` |
+
+잔여 worker 지표:
+
+| Metric | Result |
+|---|---:|
+| `order.command.queue.depth` max | `58` |
+| `command_queue_wait` max | 약 `0.68s` |
+| `command_queue_wait` avg | BUY `24.65ms`, SELL `21.79ms` |
+| `command_worker_process` avg | BUY `3.60ms`, SELL `12.74ms` |
+
+인사이트:
+
+- HTTP 응답 p95는 `1.43s`에서 `16.34ms`로 감소했습니다.
+- dropped iteration은 `255`에서 `0`으로 감소했습니다.
+- 이번 변경은 worker 처리량 자체 개선이 아니라 HTTP 응답 대기와 worker 완료 대기 분리입니다.
+- worker queue depth와 `command_queue_wait`는 별도 지표로 남아 있어, 잔여 병목은 worker backlog와 단일 market worker 처리량 한계로 분리했습니다.
+
 상세 실행 결과는 [Test Results](.docs/TEST_RESULTS.md)에 기록했습니다.
 
 ## 트러블 슈팅
@@ -307,6 +407,7 @@ k6 run k6/websocket-kafka-load-test.js
 - 주문 취소와 체결 경합 시 최종 상태 정합성
 - k6 기반 주문/조회 API 로컬 부하 테스트
 - k6 기반 WebSocket/Kafka 실시간 전파 부하 테스트
+- k6 기반 sync 201 / async 202 주문 응답 지연 비교
 
 ## 구현 범위와 제외 범위
 
@@ -326,6 +427,8 @@ k6 run k6/websocket-kafka-load-test.js
 - Outbox Publisher 기반 Kafka 이벤트 발행
 - Kafka Consumer 기반 WebSocket 실시간 체결 push
 - Kafka Consumer 기반 WebSocket 오더북 snapshot push
+- `202 Accepted` 비동기 주문 접수 API
+- 비동기 주문 worker 실패 시 `REJECTED` 상태 전이와 locked asset 해제
 
 제외 범위:
 
@@ -360,12 +463,12 @@ k6 run k6/websocket-kafka-load-test.js
 
 ## 다음 단계
 
-현재 구현 완료 범위는 Phase 1 거래 코어, Phase 2 이벤트 기반 외부 전파, 단일 market 주문 생성 병목 분리입니다.
+현재 구현 완료 범위는 Phase 1 거래 코어, Phase 2 이벤트 기반 외부 전파, 단일 market 주문 생성 병목 분리, 비동기 주문 접수 응답 분리입니다.
 
-- 비동기 주문 접수 API 설계 확정
-- 주문 접수 transaction과 market worker 체결/정산 처리 분리
-- 비동기 주문 상태 전이와 자산 잠금 정합성 테스트
-- 동기 주문 모델과 비동기 주문 모델의 `100 order/s` 부하 비교
+- 주문 생성 흐름 OOP 리팩토링
+- 비동기 주문 처리 완료 latency 별도 측정
+- worker 처리량 한계와 queue backlog 기준선 정리
+- in-memory matching / async persistence 전환 기준 문서화
 - WebSocket 연결 인증/권한 분리
 - 정산 Batch 추가
 
