@@ -1,61 +1,45 @@
 package com.coinflow.order.service.lock;
 
-import com.coinflow.common.exception.ApiException;
-import com.coinflow.common.exception.ErrorCode;
 import com.coinflow.order.domain.Order;
 import com.coinflow.order.service.command.CreateOrderCommand;
 import com.coinflow.order.service.metrics.OrderCreateStageRecorder;
-import com.coinflow.wallet.domain.LedgerType;
 import com.coinflow.wallet.domain.Wallet;
 import com.coinflow.wallet.domain.WalletLedger;
-import com.coinflow.wallet.repository.WalletLedgerJdbcRepository;
-import com.coinflow.wallet.repository.WalletRepository;
+import com.coinflow.wallet.service.WalletOrderOperationService;
 import org.springframework.stereotype.Service;
 
 @Service
 public class OrderAssetLockService {
 
-    private final WalletRepository walletRepository;
-    private final WalletLedgerJdbcRepository walletLedgerJdbcRepository;
+    private final WalletOrderOperationService walletOrderOperationService;
     private final OrderCreateStageRecorder stageRecorder;
 
     public OrderAssetLockService(
-            WalletRepository walletRepository,
-            WalletLedgerJdbcRepository walletLedgerJdbcRepository,
+            WalletOrderOperationService walletOrderOperationService,
             OrderCreateStageRecorder stageRecorder
     ) {
-        this.walletRepository = walletRepository;
-        this.walletLedgerJdbcRepository = walletLedgerJdbcRepository;
+        this.walletOrderOperationService = walletOrderOperationService;
         this.stageRecorder = stageRecorder;
     }
 
     public Wallet lockTakerWallet(Long userId, CreateOrderCommand command) {
-        Wallet wallet = stageRecorder.record(
+        return stageRecorder.record(
                 command.market().getSymbol(), command.side(), "taker_wallet_lock",
-                () -> walletRepository.findByUserIdAndAssetWithLock(userId, command.lockedAsset())
-                        .orElseThrow(() -> new ApiException(ErrorCode.INSUFFICIENT_BALANCE))
+                () -> walletOrderOperationService.lockOrderAsset(
+                        userId,
+                        command.lockedAsset(),
+                        command.lockedAmount()
+                )
         );
-        if (wallet.getAvailableBalance().compareTo(command.lockedAmount()) < 0) {
-            throw new ApiException(ErrorCode.INSUFFICIENT_BALANCE);
-        }
-        wallet.lock(command.lockedAmount());
-        return wallet;
     }
 
     public WalletLedger createOrderLockLedger(Wallet wallet, Order order, CreateOrderCommand command) {
-        return WalletLedger.create(
-                wallet,
-                LedgerType.ORDER_LOCK,
-                command.lockedAmount().negate(),
-                command.lockedAmount(),
-                order.getId(),
-                null
-        );
+        return walletOrderOperationService.createOrderLockLedger(wallet, command.lockedAmount(), order.getId());
     }
 
     public void saveOrderLockLedger(WalletLedger ledger, CreateOrderCommand command) {
         stageRecorder.record(command.market().getSymbol(), command.side(), "order_lock_ledger_save", () -> {
-            walletLedgerJdbcRepository.save(ledger);
+            walletOrderOperationService.saveOrderLockLedger(ledger);
             return null;
         });
     }
