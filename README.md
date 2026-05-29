@@ -2,26 +2,37 @@
 
 거래 정합성을 우선한 암호화폐 거래소 코어를 구현하고, k6/Prometheus/Grafana 기반 부하 테스트로 Kafka/WebSocket 전파와 주문 생성 병목을 단계적으로 분리한 백엔드 프로젝트입니다.
 
+## 서버 아키텍처
+
+![Order Processing Pipeline](.docs/images/order-processing-pipeline.png)
+
+| 구간 | 역할 |
+|---|---|
+| API | 동기 주문 생성 `201 Created`, 비동기 주문 접수 `202 Accepted` |
+| Queue / Worker | market별 command queue와 worker로 같은 market 주문 순서 보장 |
+| Matching | 가격-시간 우선 매칭과 인메모리 오더북 관리 |
+| Storage | MySQL에 주문, 체결, 지갑, 원장, 도메인 이벤트 기록 |
+| Event / Realtime | Outbox, Kafka, WebSocket STOMP 기반 체결/오더북 전파 |
+
+핵심 설계:
+
+| 주제 | 설계 |
+|---|---|
+| Source of truth | DB의 주문, 체결, 지갑, 원장을 기준 상태로 사용 |
+| 파생 상태 | 인메모리 오더북은 DB 기준으로 재구성 가능한 조회/매칭 상태 |
+| 순차 처리 | 같은 market 주문은 command queue와 worker로 순서화 |
+| 외부 전파 | DB commit 이후 outbox 이벤트를 Kafka와 WebSocket으로 전파 |
+| 비동기 접수 | `/api/v1/orders/async`는 접수 transaction 이후 `202 Accepted` 반환 |
+
 ## 프로젝트 개요
 
 | 항목 | 내용 |
 |---|---|
-| 주제 | 지정가 주문, 가격-시간 우선 매칭, 체결, 지갑 정산, 원장 기록, 실시간 체결/오더북 전파를 구현한 거래소 코어 백엔드 |
-| 목표 | 주문과 자산 정합성 유지, 실시간 전파 지연 감소, 단일 market 주문 생성 병목 분리 |
-| 개발 프로세스 | 거래 코어 MVP 구축 -> 정합성/동시성 테스트 보강 -> Outbox/Kafka/WebSocket 도입 -> k6/Grafana 병목 분석 -> 주문 응답 구조 분리 |
-| 핵심 관점 | 잔고, 주문, 체결, 원장 상태가 깨지지 않는 구조와 측정 가능한 개선 과정 |
-
-CoinFlow는 단일 인스턴스 환경에서 주문 생성부터 체결, 지갑 정산, 원장 기록까지 검증합니다. 주문이 체결될 때 `orders`, `trades`, `wallets`, `wallet_ledgers`, `domain_events`가 같은 트랜잭션 경계 안에서 일관되게 기록되도록 설계했습니다.
-
-## 핵심 어필 포인트
-
-| 영역 | 내용 |
-|---|---|
-| 거래 정합성 | 주문, 체결, 지갑, 원장을 하나의 기준 상태로 관리하고 동시성/취소/복구 테스트로 검증 |
-| 실시간 전파 | Outbox, Kafka, WebSocket STOMP 기반 체결/오더북 전파 경로 구현 |
-| 병목 분석 | k6, Prometheus, Grafana 지표로 WebSocket, Kafka, DB connection, market lock, worker queue 병목 후보 분리 |
-| 성능 개선 | trade feed p95, orderbook broadcast, market lock wait, sync/async 주문 응답 지연을 단계별 개선 |
-| 한계 인식 | `202 Accepted` 전환 이후에도 worker backlog가 남는 구조를 문서화하고 in-memory matching / async persistence 전환 기준 정리 |
+| 구현 대상 | 지정가 주문, 가격-시간 우선 매칭, 체결, 지갑 정산, 원장 기록, 실시간 체결/오더북 전파 |
+| 정합성 기준 | 주문, 체결, 지갑, 원장이 같은 트랜잭션 경계에서 일관된 상태 유지 |
+| 관측 방식 | k6, Prometheus, Grafana로 WebSocket, Kafka, DB connection, market lock, worker queue 병목 후보 분리 |
+| 개선 흐름 | 거래 코어 MVP -> 정합성 테스트 -> Kafka/WebSocket 전파 -> 병목 계측 -> 주문 응답 구조 분리 |
+| 잔여 한계 | `202 Accepted` 전환 이후에도 worker backlog와 단일 market worker 처리량 한계 잔여 |
 
 ## 성능 개선 요약
 
@@ -48,115 +59,37 @@ CoinFlow는 단일 인스턴스 환경에서 주문 생성부터 체결, 지갑 
 | 단일 market worker 한계 | queue depth 증가, worker 평균 처리 `9.73ms` | sequence DB lock 제거, command queue 지표화 | 처리량 일부 개선, backlog 잔여 |
 | HTTP 응답 대기 | sync p95 `1.43s` | `202 Accepted` 비동기 주문 접수 경로 추가 | async p95 `16.34ms` |
 
-## 기술 스택
+## 비동기 주문 처리 시퀀스
 
-| 영역 | 기술 |
-|---|---|
-| Language | Java 21 |
-| Framework | Spring Boot 3.5, Spring Web MVC |
-| Security | Spring Security, OAuth2 Resource Server, JWT |
-| Persistence | Spring Data JPA, MySQL 8, Flyway |
-| Messaging | Spring Kafka, Kafka |
-| Realtime | Spring WebSocket, STOMP |
-| Test | JUnit 5, AssertJ, Testcontainers MySQL, Embedded Kafka, k6 |
-| Observability | Actuator, Micrometer, Prometheus, Grafana |
-| Infra | Docker Compose |
+```mermaid
+sequenceDiagram
+    participant Client
+    participant API as OrderController
+    participant Accept as AcceptedOrderService
+    participant DB as MySQL
+    participant Queue as MarketCommandQueue
+    participant Worker as MarketWorker
+    participant Matching as MatchingEngine
+    participant Kafka
+    participant WS as WebSocket
 
-## 서버 아키텍처
+    Client->>API: POST /api/v1/orders/async
+    API->>Accept: acceptOrder(command)
+    Accept->>DB: validate market, lock wallet, save ACCEPTED order
+    Accept->>Queue: submit accepted order command
+    Accept-->>API: AcceptedOrderResponse
+    API-->>Client: 202 Accepted
 
-```text
-Client
-  | REST API
-  v
-Spring MVC Controller
-  | POST /orders          | POST /orders/async
-  | sync 201              | async 202
-  v                       v
-OrderService          AcceptedOrderService
-  |                       |
-  |                       v
-  |                 ACCEPTED order + asset lock
-  |                       |
-  +-----------+-----------+
-              v
-      Market Command Queue
-              |
-              v
-      Market Worker per market
-              |
-              v
-MatchingEngine + in-memory OrderBook
-              |
-              v
-MySQL
-  | orders / trades / wallets / wallet_ledgers / domain_events
-              |
-              v
-Outbox Publisher -> Kafka -> Kafka Consumer
-              |
-              v
-WebSocket STOMP topics
-  | /topic/trades/{market}
-  | /topic/orderbook/{market}
-              |
-              v
-Client subscribers
+    Queue->>Worker: dequeue by market order
+    Worker->>DB: load ACCEPTED order
+    Worker->>Matching: match by price-time priority
+    Matching-->>Worker: match plan
+    Worker->>DB: save trades, update wallets, append ledgers, save events
+    Worker->>DB: update order status
+    Worker->>Kafka: publish domain events via outbox
+    Kafka->>WS: consume trade and orderbook events
+    WS-->>Client: trades topic and orderbook topic
 ```
-
-핵심 설계:
-
-| 주제 | 설계 |
-|---|---|
-| Source of truth | DB의 주문, 체결, 지갑, 원장을 기준 상태로 둡니다. |
-| 인메모리 오더북 | 매칭 후보 조회와 호가 조회를 위한 파생 상태입니다. |
-| 오더북 반영 | DB commit 이후에만 인메모리 오더북을 변경합니다. |
-| 순차 처리 | 같은 시장의 주문 생성은 market별 command queue/worker로 순서화하고, 주문 취소와 오더북 반영 경계는 내부 lock으로 보호합니다. |
-| DB 동시성 | sequence, wallet, maker order 갱신에 pessimistic lock을 사용합니다. |
-| 지갑 모델 | `available_balance`와 `locked_balance`를 분리합니다. |
-| 원장 | 모든 지갑 변경을 `wallet_ledgers`에 append-only로 기록합니다. |
-| 이벤트 | `domain_events`를 outbox로 사용해 DB commit 이후 Kafka로 발행합니다. |
-| 비동기 접수 | `/api/v1/orders/async`는 접수 transaction 이후 `202 Accepted`를 반환하고, worker 완료는 상태 조회와 WebSocket 이벤트로 확인합니다. |
-
-## 핵심 기능
-
-### 1. 주문, 매칭, 정산 코어
-
-- 지정가 `BUY` / `SELL` 주문 생성
-- `201 Created` 동기 주문 생성과 `202 Accepted` 비동기 주문 접수
-- 가격 우선, 시간 우선 매칭
-- 부분 체결, 완전 체결
-- 주문 취소
-- BUY 주문 quote asset 잠금, SELL 주문 base asset 잠금
-- 체결 시 buyer/seller 지갑 정산
-- BUY taker 가격 차이 환불
-- append-only 지갑 원장 기록
-- worker 실패 시 `REJECTED` 상태 전이와 locked asset 해제
-- 서버 시작 시 DB의 미체결 주문으로 인메모리 오더북 초기화
-
-### 2. 조회 API
-
-- 시장 조회
-- 오더북 조회
-- 최근 체결 조회
-- 사용자 fill 조회
-- 지갑 조회
-- 지갑 원장 조회
-
-### 3. 이벤트 기반 실시간 전파
-
-- 주문/체결/정산 도메인 이벤트를 `domain_events` outbox에 저장
-- Outbox Publisher가 DB commit 이후 Kafka topic으로 발행
-- Kafka 발행 성공/실패 상태와 재시도 횟수 관리
-- Kafka Consumer 기반 WebSocket 실시간 체결 push
-- Kafka Consumer 기반 WebSocket 오더북 snapshot push
-
-| 항목 | 값 |
-|---|---|
-| WebSocket endpoint | `ws://localhost:8080/ws` |
-| 체결 feed topic | `/topic/trades/{market}` |
-| 체결 예시 topic | `/topic/trades/BTC-KRW` |
-| 오더북 feed topic | `/topic/orderbook/{market}` |
-| 오더북 예시 topic | `/topic/orderbook/BTC-KRW` |
 
 ## 개선 사항
 
@@ -367,87 +300,12 @@ Async 202:
 - 테스트 종료 시점에 Outbox unpublished event와 Kafka consumer lag를 함께 확인했습니다.
 - k6 summary와 Prometheus scrape 원본을 함께 저장해 Grafana 캡처와 수치를 대조했습니다.
 
-## 테스트
-
-전체 테스트:
-
-```bash
-./gradlew test
-```
-
-k6 부하 테스트:
-
-```bash
-k6 run k6/order-flow-load-test.js
-k6 run k6/websocket-kafka-load-test.js
-```
-
-주요 검증 범위:
-
-- 회원가입, 로그인, JWT 인증
-- BUY/SELL 주문 자산 잠금
-- 가격 우선, 시간 우선 매칭
-- 부분 체결, 완전 체결
-- BUY taker 가격 차이 환불
-- SELL taker 정산
-- 부분 체결 후 취소
-- 자기 체결 거절
-- 원장 기록
-- 오더북 조회
-- 도메인 이벤트 저장
-- Outbox Publisher Kafka 발행
-- Kafka 발행 실패 시 outbox 재시도 상태 전이
-- Kafka Consumer 기반 WebSocket 체결 알림
-- WebSocket STOMP 실제 수신 E2E
-- Kafka Consumer 기반 WebSocket 오더북 snapshot broadcast
-- 지갑 잔고 음수 방지
-- 동일 사용자 동시 주문 시 잔고 음수 방지
-- 하나의 maker 주문에 대한 동시 taker 체결 수량 초과 방지
-- 주문 처리 중 오더북 반복 조회 안정성
-- 주문 취소와 체결 경합 시 최종 상태 정합성
-- k6 기반 주문/조회 API 로컬 부하 테스트
-- k6 기반 WebSocket/Kafka 실시간 전파 부하 테스트
-- k6 기반 sync 201 / async 202 주문 응답 지연 비교
-
-## 구현 범위와 제외 범위
-
-구현 범위:
-
-- 회원가입, 로그인, JWT access token 인증
-- 사용자별 지갑 자동 생성 및 데이터 분리
-- 지정가 `BUY` / `SELL` 주문 생성
-- 주문 취소
-- 가격 우선, 시간 우선 매칭
-- 부분 체결, 완전 체결
-- 체결 시 buyer/seller 지갑 정산
-- append-only 지갑 원장 기록
-- 시장, 오더북, 최근 체결, 사용자 fill, 지갑, 원장 조회
-- 서버 시작 시 DB의 미체결 주문으로 인메모리 오더북 초기화
-- 주문/체결/정산 도메인 이벤트 로그 저장
-- Outbox Publisher 기반 Kafka 이벤트 발행
-- Kafka Consumer 기반 WebSocket 실시간 체결 push
-- Kafka Consumer 기반 WebSocket 오더북 snapshot push
-- `202 Accepted` 비동기 주문 접수 API
-- 비동기 주문 worker 실패 시 `REJECTED` 상태 전이와 locked asset 해제
-
-제외 범위:
-
-- 입금/출금
-- 시장가 주문
-- IOC/FOK/GTT, post-only, iceberg 주문
-- 수수료
-- refresh token, OAuth/social login, role/permission
-- WebSocket 연결 인증/권한 분리
-- Redis, 서버 분리
-- replay, redrive, reconciliation
-- 관리자 페이지
-
-일부 로컬 개발 편의를 위한 API와 인프라 기반은 존재하지만, 운영 기능 범위와 구분합니다. 예를 들어 dev/test 입금 보조 API는 `prod` 프로필에서 제외됩니다.
-
 ## 문서
 
 | 문서 | 설명 |
 |---|---|
+| [Features](.docs/FEATURES.md) | 상세 기능, 검증 범위, 구현/제외 범위 |
+| [Next Steps](.docs/NEXT_STEPS.md) | 후속 작업 후보, 우선순위, 완료 기능으로 표기하지 않는 범위 |
 | [PRD](.docs/PRD.md) | MVP 제품 범위, 포함/제외 기준, 성공 기준 |
 | [Plan](.docs/Plan.md) | MVP 구현 순서와 설계 원칙 |
 | [Phase 2 PRD](.docs/v2/PRD.md) | Kafka/Outbox/WebSocket 외부 전파 범위와 완료 상태 |
@@ -463,13 +321,20 @@ k6 run k6/websocket-kafka-load-test.js
 
 ## 다음 단계
 
-현재 구현 완료 범위는 Phase 1 거래 코어, Phase 2 이벤트 기반 외부 전파, 단일 market 주문 생성 병목 분리, 비동기 주문 접수 응답 분리입니다.
+현재 완료 범위는 거래 코어, 이벤트 기반 외부 전파, 단일 market 병목 분리, 비동기 주문 접수 응답 분리까지입니다.
 
-- 주문 생성 흐름 OOP 리팩토링
-- 비동기 주문 처리 완료 latency 별도 측정
-- worker 처리량 한계와 queue backlog 기준선 정리
-- in-memory matching / async persistence 전환 기준 문서화
-- WebSocket 연결 인증/권한 분리
-- 정산 Batch 추가
+후속 작업은 [Next Steps](.docs/NEXT_STEPS.md)에 분리해 관리합니다.
 
-WebSocket 인증/권한 분리와 Batch 정산은 아직 구현 완료 기능으로 표기하지 않습니다.
+## 기술 스택
+
+| 영역 | 기술 |
+|---|---|
+| Language | Java 21 |
+| Framework | Spring Boot 3.5, Spring Web MVC |
+| Security | Spring Security, OAuth2 Resource Server, JWT |
+| Persistence | Spring Data JPA, MySQL 8, Flyway |
+| Messaging | Spring Kafka, Kafka |
+| Realtime | Spring WebSocket, STOMP |
+| Test | JUnit 5, AssertJ, Testcontainers MySQL, Embedded Kafka, k6 |
+| Observability | Actuator, Micrometer, Prometheus, Grafana |
+| Infra | Docker Compose |
