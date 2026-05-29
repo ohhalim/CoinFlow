@@ -10,10 +10,7 @@ import com.coinflow.order.repository.OrderRepository;
 import com.coinflow.order.service.lock.MarketOrderLockScope;
 import com.coinflow.order.service.lock.MarketOrderLockService;
 import com.coinflow.wallet.domain.LedgerType;
-import com.coinflow.wallet.domain.Wallet;
-import com.coinflow.wallet.domain.WalletLedger;
-import com.coinflow.wallet.repository.WalletLedgerRepository;
-import com.coinflow.wallet.repository.WalletRepository;
+import com.coinflow.wallet.service.WalletOrderOperationService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -28,8 +25,7 @@ import java.math.BigDecimal;
 public class OrderCancelService {
 
     private final OrderRepository orderRepository;
-    private final WalletRepository walletRepository;
-    private final WalletLedgerRepository walletLedgerRepository;
+    private final WalletOrderOperationService walletOrderOperationService;
     private final MatchingEngine matchingEngine;
     private final DomainEventRecorder eventRecorder;
     private final MarketOrderLockService marketOrderLockService;
@@ -37,16 +33,14 @@ public class OrderCancelService {
 
     public OrderCancelService(
             OrderRepository orderRepository,
-            WalletRepository walletRepository,
-            WalletLedgerRepository walletLedgerRepository,
+            WalletOrderOperationService walletOrderOperationService,
             MatchingEngine matchingEngine,
             DomainEventRecorder eventRecorder,
             MarketOrderLockService marketOrderLockService,
             PlatformTransactionManager transactionManager
     ) {
         this.orderRepository = orderRepository;
-        this.walletRepository = walletRepository;
-        this.walletLedgerRepository = walletLedgerRepository;
+        this.walletOrderOperationService = walletOrderOperationService;
         this.matchingEngine = matchingEngine;
         this.eventRecorder = eventRecorder;
         this.marketOrderLockService = marketOrderLockService;
@@ -76,15 +70,14 @@ public class OrderCancelService {
         if (!lockedOrder.isCancelable()) throw new ApiException(ErrorCode.ORDER_NOT_CANCELABLE);
 
         BigDecimal releaseAmount = lockedOrder.releasableAmount();
-        Wallet wallet = walletRepository.findByUserIdAndAssetWithLock(currentUserId, lockedOrder.getLockedAsset())
-                .orElseThrow(() -> new ApiException(ErrorCode.INSUFFICIENT_BALANCE));
-        wallet.unlock(releaseAmount);
-
-        walletLedgerRepository.save(WalletLedger.create(
-                wallet, LedgerType.ORDER_CANCEL_RELEASE,
-                releaseAmount, releaseAmount.negate(),
-                orderId, null
-        ));
+        walletOrderOperationService.releaseOrderLock(
+                currentUserId,
+                lockedOrder.getLockedAsset(),
+                releaseAmount,
+                orderId,
+                LedgerType.ORDER_CANCEL_RELEASE,
+                ErrorCode.INSUFFICIENT_BALANCE
+        );
 
         lockedOrder.cancel();
         eventRecorder.recordOrderCanceled(lockedOrder, lockedOrder.getLockedAsset(), releaseAmount.toPlainString());

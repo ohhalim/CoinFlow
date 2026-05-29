@@ -17,10 +17,7 @@ import com.coinflow.order.service.metrics.OrderCreateStageRecorder;
 import com.coinflow.order.service.settlement.OrderSettlementService;
 import com.coinflow.trade.domain.Trade;
 import com.coinflow.wallet.domain.LedgerType;
-import com.coinflow.wallet.domain.Wallet;
-import com.coinflow.wallet.domain.WalletLedger;
-import com.coinflow.wallet.repository.WalletLedgerRepository;
-import com.coinflow.wallet.repository.WalletRepository;
+import com.coinflow.wallet.service.WalletOrderOperationService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -38,8 +35,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class AcceptedOrderProcessor {
 
     private final OrderRepository orderRepository;
-    private final WalletRepository walletRepository;
-    private final WalletLedgerRepository walletLedgerRepository;
+    private final WalletOrderOperationService walletOrderOperationService;
     private final MatchingEngine matchingEngine;
     private final OrderBookRecoveryService orderBookRecoveryService;
     private final DomainEventRecorder eventRecorder;
@@ -50,8 +46,7 @@ public class AcceptedOrderProcessor {
 
     public AcceptedOrderProcessor(
             OrderRepository orderRepository,
-            WalletRepository walletRepository,
-            WalletLedgerRepository walletLedgerRepository,
+            WalletOrderOperationService walletOrderOperationService,
             MatchingEngine matchingEngine,
             OrderBookRecoveryService orderBookRecoveryService,
             DomainEventRecorder eventRecorder,
@@ -61,8 +56,7 @@ public class AcceptedOrderProcessor {
             PlatformTransactionManager transactionManager
     ) {
         this.orderRepository = orderRepository;
-        this.walletRepository = walletRepository;
-        this.walletLedgerRepository = walletLedgerRepository;
+        this.walletOrderOperationService = walletOrderOperationService;
         this.matchingEngine = matchingEngine;
         this.orderBookRecoveryService = orderBookRecoveryService;
         this.eventRecorder = eventRecorder;
@@ -145,18 +139,14 @@ public class AcceptedOrderProcessor {
                 return null;
             }
             BigDecimal releaseAmount = order.releasableAmount();
-            Wallet wallet = walletRepository.findByUserIdAndAssetWithLock(order.getUserId(), order.getLockedAsset())
-                    .orElseThrow(() -> new ApiException(ErrorCode.WALLET_NOT_FOUND));
-            wallet.unlock(releaseAmount);
-            walletLedgerRepository.save(WalletLedger.create(
-                    wallet,
-                    LedgerType.ORDER_REJECT_RELEASE,
-                    releaseAmount,
-                    releaseAmount.negate(),
-                    orderId,
-                    null
-            ));
             String releasedAsset = order.getLockedAsset();
+            walletOrderOperationService.releaseOrderLock(
+                    order.getUserId(),
+                    releasedAsset,
+                    releaseAmount,
+                    orderId,
+                    LedgerType.ORDER_REJECT_RELEASE
+            );
             order.reject();
             eventRecorder.recordOrderRejected(order, releasedAsset, releaseAmount.toPlainString(), reason);
             return null;

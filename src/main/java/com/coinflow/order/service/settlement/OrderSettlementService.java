@@ -14,8 +14,7 @@ import com.coinflow.trade.repository.TradeRepository;
 import com.coinflow.wallet.domain.LedgerType;
 import com.coinflow.wallet.domain.Wallet;
 import com.coinflow.wallet.domain.WalletLedger;
-import com.coinflow.wallet.repository.WalletLedgerJdbcRepository;
-import com.coinflow.wallet.repository.WalletRepository;
+import com.coinflow.wallet.service.WalletOrderOperationService;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -30,25 +29,22 @@ import java.util.stream.Stream;
 public class OrderSettlementService {
 
     private final OrderRepository orderRepository;
-    private final WalletRepository walletRepository;
     private final TradeRepository tradeRepository;
-    private final WalletLedgerJdbcRepository walletLedgerJdbcRepository;
     private final DomainEventRecorder eventRecorder;
+    private final WalletOrderOperationService walletOrderOperationService;
     private final OrderCreateStageRecorder stageRecorder;
 
     public OrderSettlementService(
             OrderRepository orderRepository,
-            WalletRepository walletRepository,
             TradeRepository tradeRepository,
-            WalletLedgerJdbcRepository walletLedgerJdbcRepository,
             DomainEventRecorder eventRecorder,
+            WalletOrderOperationService walletOrderOperationService,
             OrderCreateStageRecorder stageRecorder
     ) {
         this.orderRepository = orderRepository;
-        this.walletRepository = walletRepository;
         this.tradeRepository = tradeRepository;
-        this.walletLedgerJdbcRepository = walletLedgerJdbcRepository;
         this.eventRecorder = eventRecorder;
+        this.walletOrderOperationService = walletOrderOperationService;
         this.stageRecorder = stageRecorder;
     }
 
@@ -208,7 +204,7 @@ public class OrderSettlementService {
         }
 
         stageRecorder.record(market.getSymbol(), taker.getSide(), "settlement_ledger_save", () -> {
-            walletLedgerJdbcRepository.saveAll(ledgers);
+            walletOrderOperationService.saveLedgers(ledgers);
             return null;
         });
 
@@ -225,8 +221,7 @@ public class OrderSettlementService {
         for (WalletKey key : sortedKeys) {
             Wallet wallet = stageRecorder.record(
                     marketSymbol, side, "settlement_wallet_lock",
-                    () -> walletRepository.findByUserIdAndAssetWithLock(key.userId(), key.asset())
-                            .orElseThrow(() -> new ApiException(ErrorCode.WALLET_NOT_FOUND))
+                    () -> walletOrderOperationService.lockWallet(key.userId(), key.asset())
             );
             wallets.put(key, wallet);
         }
