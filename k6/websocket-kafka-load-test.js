@@ -15,11 +15,15 @@ const WS_DURATION = __ENV.WS_DURATION || `${durationSeconds(DURATION) + duration
 const ORDER_RATE = Number(__ENV.ORDER_RATE || 10);
 const ORDER_VUS = Number(__ENV.ORDER_VUS || 8);
 const ORDER_MAX_VUS = Number(__ENV.ORDER_MAX_VUS || 20);
+const ORDER_ENDPOINT = normalizePath(__ENV.ORDER_ENDPOINT || '/api/v1/orders');
+const ORDER_MODE = String(__ENV.ORDER_MODE || (ORDER_ENDPOINT.endsWith('/async') ? 'async' : 'sync')).toLowerCase();
+const ORDER_SUCCESS_STATUS = Number(__ENV.ORDER_SUCCESS_STATUS || (ORDER_MODE === 'async' ? 202 : 201));
 const WS_SUBSCRIBERS = Number(__ENV.WS_SUBSCRIBERS || 5);
 const BUYER_COUNT = Number(__ENV.BUYER_COUNT || 8);
 const SELLER_COUNT = Number(__ENV.SELLER_COUNT || 8);
 const PASSWORD = 'password1234';
 
+const acceptedOrders = new Counter('accepted_orders');
 const createdOrders = new Counter('created_orders');
 const createdTrades = new Counter('created_trades');
 const orderFailures = new Counter('order_failures');
@@ -33,6 +37,7 @@ const currentTradeMessages = new Counter('ws_current_trade_messages');
 const orderbookMessages = new Counter('ws_orderbook_messages');
 const tradeDeliveryLag = new Trend('ws_trade_delivery_lag', true);
 const orderCreateDuration = new Trend('order_create_duration', true);
+const orderAcceptDuration = new Trend('order_accept_duration', true);
 
 export const options = {
   summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)', 'p(99)'],
@@ -165,7 +170,7 @@ export function orderCreation(data) {
     const side = isBuy ? 'BUY' : 'SELL';
 
     const response = postJson(
-      '/api/v1/orders',
+      ORDER_ENDPOINT,
       {
         market: MARKET,
         side,
@@ -175,18 +180,30 @@ export function orderCreation(data) {
         quantity: '0.0001',
         clientOrderId: `k6-ws-${data.runId}-${side}-${iteration}`,
       },
-      authParams(user.token, { endpoint: 'orders:create', type: 'write', side })
+      authParams(user.token, { endpoint: `orders:${ORDER_MODE}`, type: 'write', side, order_mode: ORDER_MODE })
     );
-    orderCreateDuration.add(response.timings.duration);
+    orderCreateDuration.add(response.timings.duration, { order_mode: ORDER_MODE });
+    if (ORDER_MODE === 'async') {
+      orderAcceptDuration.add(response.timings.duration);
+    }
 
-    const ok = check(response, {
-      'order create returns 201': (res) => res.status === 201,
+    const responseChecks = {
+      [`order ${ORDER_MODE} returns ${ORDER_SUCCESS_STATUS}`]: (res) => res.status === ORDER_SUCCESS_STATUS,
       'order response has orderId': (res) => Boolean(jsonValue(res, 'orderId')),
-    });
+    };
+    if (ORDER_MODE === 'async') {
+      responseChecks['async order status is ACCEPTED'] = (res) => jsonValue(res, 'status') === 'ACCEPTED';
+    }
+
+    const ok = check(response, responseChecks);
 
     if (ok) {
       createdOrders.add(1);
-      createdTrades.add((jsonValue(response, 'trades') || []).length);
+      if (ORDER_MODE === 'async') {
+        acceptedOrders.add(1);
+      } else {
+        createdTrades.add((jsonValue(response, 'trades') || []).length);
+      }
     } else {
       orderFailures.add(1);
     }
@@ -403,4 +420,9 @@ function durationSeconds(value) {
     return amount * 60;
   }
   return amount;
+}
+
+function normalizePath(path) {
+  const text = String(path || '').trim();
+  return text.startsWith('/') ? text : `/${text}`;
 }

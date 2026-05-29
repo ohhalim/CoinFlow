@@ -1883,7 +1883,92 @@ Operational assumptions and cautions:
 - 재시작 시 sequence 초기값은 `orders.max(sequence)`와 `order_sequences.last_sequence` 중 큰 값 기준으로 복구한다.
 - `order_sequences.last_sequence`는 hot path에서 더 이상 실시간 증가하지 않으므로 운영 기준 source of truth는 `orders.max(sequence)`다.
 
-## 29. 발견 이슈
+## 29. Async order acceptance load comparison
+
+Date: 2026-05-29
+
+Context:
+
+| 항목 | 값 |
+|---|---|
+| Issue | `#90` 비동기 주문 접수 부하 테스트 및 응답 지연 비교 |
+| Branch | `test/90/async-order-load-comparison` |
+| DB | Local Docker MySQL 8 |
+| Kafka | Local Docker Kafka |
+| Hikari pool size | `20` |
+
+Measurement scope:
+
+- Sync endpoint: `POST /api/v1/orders`, `201 Created`, worker 처리 완료 후 응답
+- Async endpoint: `POST /api/v1/orders/async`, `202 Accepted`, 주문 접수 transaction 후 응답
+- 공통 조건
+  - `50 WS subscribers`
+  - `100 order/s`
+  - `5m`
+  - `DB_POOL_MAX_SIZE=20`
+  - `ORDER_VUS=40`
+  - `ORDER_MAX_VUS=160`
+  - `BUYER_COUNT=40`
+  - `SELLER_COUNT=40`
+
+Verification:
+
+```bash
+ORDER_ENDPOINT=/api/v1/orders ORDER_MODE=sync WS_SUBSCRIBERS=50 ORDER_RATE=100 DURATION=5m DB_POOL_MAX_SIZE=20 ORDER_VUS=40 ORDER_MAX_VUS=160 BUYER_COUNT=40 SELLER_COUNT=40 k6 run k6/websocket-kafka-load-test.js
+
+ORDER_ENDPOINT=/api/v1/orders/async ORDER_MODE=async WS_SUBSCRIBERS=50 ORDER_RATE=100 DURATION=5m DB_POOL_MAX_SIZE=20 ORDER_VUS=40 ORDER_MAX_VUS=160 BUYER_COUNT=40 SELLER_COUNT=40 k6 run k6/websocket-kafka-load-test.js
+```
+
+Verification result:
+
+| 항목 | 결과 |
+|---|---:|
+| Sync measurement window | `2026-05-29 12:02:24 ~ 12:07:52` |
+| Async measurement window | `2026-05-29 12:18:52 ~ 12:24:20` |
+| Async k6 threshold | Passed |
+| Async HTTP failed / 5xx | `0.00%` / `0` |
+
+Grafana capture:
+
+| Case | Time range | File |
+|---|---|---|
+| Sync 201 | `2026-05-29 12:02:00 ~ 12:08:30` | `images/sync-order-load-201.png` |
+| Async 202 | `2026-05-29 12:18:30 ~ 12:25:00` | `images/async-order-load-202.png` |
+
+Result:
+
+| Case | Endpoint | Status | Successful order requests | k6 reported throughput | Dropped iterations | Order response p95 / p99 / max | Trade lag p95 / p99 / max | HTTP failed / 5xx | WS/STOMP errors |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|
+| Sync 201 | `/api/v1/orders` | FAIL: p95 threshold, VU saturation | `29,746` | `90.62/s` | `255` | `1.43s` / `1.79s` / `2.11s` | `524ms` / `727ms` / `1.02s` | `0.00%` / `0` | `0` |
+| Async 202 | `/api/v1/orders/async` | PASS | `30,000` | `91.42/s` | `0` | `16.34ms` / `27.16ms` / `278.35ms` | `543ms` / `726ms` / `932ms` | `0.00%` / `0` | `0` |
+
+Async observability:
+
+| Metric | Max | Average |
+|---|---:|---:|
+| `command_queue_wait` BUY | `687.14ms` | `24.65ms` |
+| `command_queue_wait` SELL | `680.30ms` | `21.79ms` |
+| `command_worker_process` BUY | `144.60ms` | `3.60ms` |
+| `command_worker_process` SELL | `305.63ms` | `12.74ms` |
+| `order.command.queue.depth` | `58` | - |
+| Hikari pending | `0` | - |
+| Kafka consumer lag | `0` | - |
+
+Decision:
+
+- 202 Accepted 경로에서 HTTP 응답 p95는 `1.43s`에서 `16.34ms`로 감소
+- dropped iteration은 `255`에서 `0`으로 감소
+- HTTP failed, 5xx, Kafka consumer lag, WebSocket/STOMP error 병목 후보 제외
+- worker backlog는 별도 지표로 유지
+  - `order.command.queue.depth` max `58`
+  - `command_queue_wait` max 약 `0.68s`
+- 이번 결과는 처리량 자체 개선보다 HTTP 응답 대기와 worker 완료 대기 분리로 판단
+- 후속 작업
+  - 비동기 주문 처리 완료 latency 별도 측정
+  - worker 처리량 한계와 queue backlog 기준선 정리
+  - in-memory matching / async persistence 전환 기준 문서화
+
+## 30. 발견 이슈
 
 | ID | Severity | Symptom | Suspected cause | Action |
 |---|---|---|---|---|
@@ -1903,6 +1988,7 @@ Operational assumptions and cautions:
 | ORD-012 | MAJOR | `#78` trade JDBC insert 실험에서 dropped iteration은 `783 -> 485`로 감소했지만 p95 `1.62s` 유지 | 개별 DB write 비용보다 단일 market 직렬화 대기 영향이 큼 | JDBC 전환 미적용, 직렬화 범위 재설계 검토 |
 | ORD-013 | MAJOR | market command queue 적용 후 `100 order/s`에서 p95 `1.89s`, queue depth max `159` 유지 | 단일 market worker 처리량이 유입량보다 낮음 | worker 내부 처리 시간 축소 또는 비동기 주문 모델 검토 |
 | ORD-014 | MAJOR | sequence lock 제거 후 dropped iteration은 `1,393 -> 458`로 감소했지만 p95 `1.65s` 유지 | sequence 발급은 개선됐으나 단일 market worker 처리량이 `100 order/s` 기준에 미달 | worker 처리 시간 추가 축소 또는 비동기 주문 접수 분리 검토 |
+| ORD-015 | MAJOR | async 202 경로에서 HTTP p95는 `16.34ms`로 감소했지만 `command_queue_wait` max `0.68s`, queue depth max `58` 유지 | HTTP 응답 대기와 worker 완료 대기는 분리됐으나 단일 market worker backlog는 별도 관리 필요 | worker 완료 latency 측정, queue backlog 기준선 정리, in-memory matching / async persistence 전환 기준 문서화 |
 
 Severity:
 
@@ -1910,7 +1996,7 @@ Severity:
 - `MAJOR`: 5xx, lock timeout, 반복 가능한 성능 병목
 - `MINOR`: 문서/로그/테스트 안정성 개선
 
-## 30. 후속 조치
+## 31. 후속 조치
 
 | Action | Owner | Status | Link |
 |---|---|---|---|
@@ -1937,4 +2023,6 @@ Severity:
 | Reduce order transaction hold time |  | PARTIAL |  |
 | Redesign order creation serialization scope |  | DONE |  |
 | Reduce market worker process time |  | PARTIAL |  |
-| Evaluate async order accepted model |  | TODO |  |
+| Evaluate async order accepted model |  | DONE |  |
+| Compare sync 201 and async 202 order load latency |  | DONE |  |
+| Measure async worker completion latency |  | TODO |  |

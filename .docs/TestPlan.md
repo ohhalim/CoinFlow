@@ -1208,7 +1208,76 @@ WS_SUBSCRIBERS=50 ORDER_RATE=100 DURATION=5m DB_POOL_MAX_SIZE=20 ORDER_VUS=40 OR
 | queue depth 증가 후 회복 없음 | 단일 market 처리량 한계 |
 | Kafka lag, WebSocket error, 5xx 미관측 | 실시간 전파와 서버 오류는 병목 후보에서 제외 |
 
-## 17. Invariants
+## 17. Async Order Acceptance Load Comparison
+
+동기 주문 생성과 비동기 주문 접수의 응답 지연 비교 기준이다. 기존 동기 경로는 체결/정산 완료 후 `201 Created`를 반환하고, 비동기 경로는 접수 transaction 이후 `202 Accepted`를 반환한다.
+
+측정 목적:
+
+- 동기 주문 생성 응답 지연과 비동기 주문 접수 응답 지연 비교
+- `command_queue_wait`가 HTTP 응답 지연에 반영되는지 여부 분리
+- worker 처리량 한계와 API 응답 책임 분리 효과 구분
+- in-memory matching 전환 전 현재 구조 한계 기록
+
+공통 조건:
+
+| 항목 | 값 |
+|---|---:|
+| WebSocket subscribers | `50` |
+| Order rate | `100/s` |
+| Duration | `5m` |
+| Hikari pool size | `20` |
+| Order VUs / Max VUs | `40` / `160` |
+| Buyer / Seller count | `40` / `40` |
+
+동기 주문 생성 측정:
+
+```bash
+ORDER_ENDPOINT=/api/v1/orders ORDER_MODE=sync WS_SUBSCRIBERS=50 ORDER_RATE=100 DURATION=5m DB_POOL_MAX_SIZE=20 ORDER_VUS=40 ORDER_MAX_VUS=160 BUYER_COUNT=40 SELLER_COUNT=40 k6 run k6/websocket-kafka-load-test.js
+```
+
+비동기 주문 접수 측정:
+
+```bash
+ORDER_ENDPOINT=/api/v1/orders/async ORDER_MODE=async WS_SUBSCRIBERS=50 ORDER_RATE=100 DURATION=5m DB_POOL_MAX_SIZE=20 ORDER_VUS=40 ORDER_MAX_VUS=160 BUYER_COUNT=40 SELLER_COUNT=40 k6 run k6/websocket-kafka-load-test.js
+```
+
+기록 항목:
+
+| 항목 | 목적 |
+|---|---|
+| `order_create_duration p95 / p99 / max` | 동기/비동기 HTTP 응답 지연 비교 |
+| `order_accept_duration p95 / p99 / max` | 비동기 접수 응답 지연 확인 |
+| `created_orders` | HTTP 주문 요청 성공 수 |
+| `accepted_orders` | 비동기 주문 접수 성공 수 |
+| `created_trades` | 동기 응답 기준 체결 수 |
+| `ws_trade_messages` | 비동기 worker 체결 처리와 WebSocket 전파 확인 |
+| `command_queue_wait` | worker 실행 전 대기 시간 |
+| `command_worker_process` | worker 내부 체결/정산 처리 시간 |
+| `order.command.queue.depth` | market worker backlog |
+| `dropped_iterations` | 목표 order rate 미달 여부 |
+| `HTTP failed / 5xx` | API 실패 여부 |
+| `Kafka consumer lag` | 실시간 전파 적체 여부 |
+| `WebSocket/STOMP error` | subscriber 전파 오류 여부 |
+
+판단 기준:
+
+| 결과 | 판단 |
+|---|---|
+| async `order_accept_duration` 감소, `command_queue_wait` 유지 | HTTP 응답 책임 분리, worker 처리량 한계 유지 |
+| async `order_accept_duration` 감소, queue depth 증가 | 접수는 안정, worker backlog 증가 |
+| `command_worker_process` 유지, queue depth 증가 | 단일 market worker 처리량 초과 |
+| Kafka lag 또는 WebSocket error 증가 | 실시간 전파 구간 재분석 대상 |
+| HTTP failure 또는 5xx 증가 | API 안정성 한계 |
+
+결과 기록:
+
+- `.docs/TEST_RESULTS.md`에 sync/async 비교 표 추가
+- Grafana 캡처는 sync 100 order/s, async 100 order/s 각 1장 저장
+- 개선 지표와 잔여 병목을 분리해 기록
+- 후속 작업 후보: OOP 리팩토링, worker throughput 개선, in-memory matching 설계
+
+## 18. Invariants
 
 모든 통합 테스트 후 아래 불변식을 검증한다.
 
