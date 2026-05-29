@@ -1,4 +1,4 @@
-package com.coinflow.order.service;
+package com.coinflow.order.service.command;
 
 import com.coinflow.market.domain.Market;
 import com.coinflow.order.domain.OrderSide;

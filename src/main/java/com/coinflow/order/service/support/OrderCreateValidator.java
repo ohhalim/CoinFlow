@@ -1,4 +1,4 @@
-package com.coinflow.order.service;
+package com.coinflow.order.service.support;
 
 import com.coinflow.common.exception.ApiException;
 import com.coinflow.common.exception.ErrorCode;
@@ -7,6 +7,7 @@ import com.coinflow.order.domain.OrderSide;
 import com.coinflow.order.domain.OrderType;
 import com.coinflow.order.domain.TimeInForce;
 import com.coinflow.order.dto.CreateOrderRequest;
+import com.coinflow.order.service.command.CreateOrderCommand;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;

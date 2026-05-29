@@ -11,6 +11,14 @@ import com.coinflow.order.domain.OrderStatus;
 import com.coinflow.order.dto.AcceptedOrderResponse;
 import com.coinflow.order.dto.CreateOrderRequest;
 import com.coinflow.order.repository.OrderRepository;
+import com.coinflow.order.service.command.CreateOrderCommand;
+import com.coinflow.order.service.command.MarketOrderCommandQueue;
+import com.coinflow.order.service.lock.OrderAssetLockService;
+import com.coinflow.order.service.metrics.OrderCreateStageRecorder;
+import com.coinflow.order.service.processor.AcceptedOrderProcessor;
+import com.coinflow.order.service.support.ClientOrderIdService;
+import com.coinflow.order.service.support.MarketSequenceAllocator;
+import com.coinflow.order.service.support.OrderCreateValidator;
 import com.coinflow.wallet.domain.Wallet;
 import com.coinflow.wallet.domain.WalletLedger;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -32,6 +40,7 @@ public class AcceptedOrderService {
     private final MarketSequenceAllocator marketSequenceAllocator;
     private final OrderCreateStageRecorder stageRecorder;
     private final AcceptedOrderProcessor acceptedOrderProcessor;
+    private final ClientOrderIdService clientOrderIdService;
     private final TransactionTemplate transactionTemplate;
 
     public AcceptedOrderService(
@@ -44,6 +53,7 @@ public class AcceptedOrderService {
             MarketSequenceAllocator marketSequenceAllocator,
             OrderCreateStageRecorder stageRecorder,
             AcceptedOrderProcessor acceptedOrderProcessor,
+            ClientOrderIdService clientOrderIdService,
             PlatformTransactionManager transactionManager
     ) {
         this.marketRepository = marketRepository;
@@ -55,6 +65,7 @@ public class AcceptedOrderService {
         this.marketSequenceAllocator = marketSequenceAllocator;
         this.stageRecorder = stageRecorder;
         this.acceptedOrderProcessor = acceptedOrderProcessor;
+        this.clientOrderIdService = clientOrderIdService;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
@@ -69,7 +80,7 @@ public class AcceptedOrderService {
             acceptedOrder = transactionTemplate.execute(status -> acceptInTransaction(
                     currentUserId, request, market, command, side));
         } catch (DataIntegrityViolationException e) {
-            if (request.clientOrderId() != null && isDuplicateClientOrderId(e)) {
+            if (request.clientOrderId() != null && clientOrderIdService.isDuplicateConstraintViolation(e)) {
                 throw new ApiException(ErrorCode.DUPLICATE_CLIENT_ORDER_ID);
             }
             throw e;
@@ -99,15 +110,7 @@ public class AcceptedOrderService {
             CreateOrderCommand command,
             OrderSide side
     ) {
-        if (request.clientOrderId() != null) {
-            boolean duplicatedClientOrderId = stageRecorder.record(
-                    market.getSymbol(), side, "client_order_id_check",
-                    () -> orderRepository.existsByUserIdAndClientOrderId(currentUserId, request.clientOrderId())
-            );
-            if (duplicatedClientOrderId) {
-                throw new ApiException(ErrorCode.DUPLICATE_CLIENT_ORDER_ID);
-            }
-        }
+        clientOrderIdService.validateUnique(currentUserId, request, market, side);
 
         Long sequence = stageRecorder.record(
                 market.getSymbol(), side, "sequence_allocate",
@@ -149,11 +152,4 @@ public class AcceptedOrderService {
         );
     }
 
-    private boolean isDuplicateClientOrderId(DataIntegrityViolationException e) {
-        String message = e.getMostSpecificCause().getMessage();
-        return message != null && (
-                message.contains("uq_orders_user_client_order")
-                        || message.contains("uk_orders_user_client_order_id")
-        );
-    }
 }

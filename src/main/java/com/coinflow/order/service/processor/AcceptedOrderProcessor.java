@@ -1,4 +1,4 @@
-package com.coinflow.order.service;
+package com.coinflow.order.service.processor;
 
 import com.coinflow.common.exception.ApiException;
 import com.coinflow.common.exception.ErrorCode;
@@ -11,6 +11,10 @@ import com.coinflow.order.matching.MatchResult;
 import com.coinflow.order.matching.MatchingEngine;
 import com.coinflow.order.matching.OrderBookRecoveryService;
 import com.coinflow.order.repository.OrderRepository;
+import com.coinflow.order.service.lock.MarketOrderLockScope;
+import com.coinflow.order.service.lock.MarketOrderLockService;
+import com.coinflow.order.service.metrics.OrderCreateStageRecorder;
+import com.coinflow.order.service.settlement.OrderSettlementService;
 import com.coinflow.trade.domain.Trade;
 import com.coinflow.wallet.domain.LedgerType;
 import com.coinflow.wallet.domain.Wallet;
@@ -28,7 +32,6 @@ import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.locks.ReentrantLock;
 
 @Slf4j
 @Service
@@ -40,7 +43,7 @@ public class AcceptedOrderProcessor {
     private final MatchingEngine matchingEngine;
     private final OrderBookRecoveryService orderBookRecoveryService;
     private final DomainEventRecorder eventRecorder;
-    private final MarketOrderLockManager marketOrderLockManager;
+    private final MarketOrderLockService marketOrderLockService;
     private final OrderSettlementService orderSettlementService;
     private final OrderCreateStageRecorder stageRecorder;
     private final TransactionTemplate transactionTemplate;
@@ -52,7 +55,7 @@ public class AcceptedOrderProcessor {
             MatchingEngine matchingEngine,
             OrderBookRecoveryService orderBookRecoveryService,
             DomainEventRecorder eventRecorder,
-            MarketOrderLockManager marketOrderLockManager,
+            MarketOrderLockService marketOrderLockService,
             OrderSettlementService orderSettlementService,
             OrderCreateStageRecorder stageRecorder,
             PlatformTransactionManager transactionManager
@@ -63,7 +66,7 @@ public class AcceptedOrderProcessor {
         this.matchingEngine = matchingEngine;
         this.orderBookRecoveryService = orderBookRecoveryService;
         this.eventRecorder = eventRecorder;
-        this.marketOrderLockManager = marketOrderLockManager;
+        this.marketOrderLockService = marketOrderLockService;
         this.orderSettlementService = orderSettlementService;
         this.stageRecorder = stageRecorder;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
@@ -79,7 +82,7 @@ public class AcceptedOrderProcessor {
     }
 
     private void processAcceptedOrderInternal(Market market, OrderSide side, Long orderId) {
-        MarketLockScope marketLockScope = acquireMarketLock(market, side);
+        MarketOrderLockScope marketLockScope = marketOrderLockService.acquire(market, side);
         AtomicBoolean releaseRegistered = new AtomicBoolean(false);
 
         try {
@@ -160,37 +163,4 @@ public class AcceptedOrderProcessor {
         });
     }
 
-    private MarketLockScope acquireMarketLock(Market market, OrderSide side) {
-        ReentrantLock marketLock = marketOrderLockManager.getLock(market.getId());
-        long marketLockWaitStartedAt = System.nanoTime();
-        marketLock.lock();
-        long marketLockAcquiredAt = System.nanoTime();
-        stageRecorder.record(market.getSymbol(), side, "market_lock_wait",
-                marketLockAcquiredAt - marketLockWaitStartedAt);
-        return new MarketLockScope(market.getSymbol(), side, marketLock, marketLockAcquiredAt);
-    }
-
-    private class MarketLockScope {
-        private final String marketSymbol;
-        private final OrderSide side;
-        private final ReentrantLock lock;
-        private final long acquiredAt;
-        private boolean released;
-
-        private MarketLockScope(String marketSymbol, OrderSide side, ReentrantLock lock, long acquiredAt) {
-            this.marketSymbol = marketSymbol;
-            this.side = side;
-            this.lock = lock;
-            this.acquiredAt = acquiredAt;
-        }
-
-        private void release() {
-            if (released) {
-                return;
-            }
-            released = true;
-            stageRecorder.record(marketSymbol, side, "market_lock_hold", System.nanoTime() - acquiredAt);
-            lock.unlock();
-        }
-    }
 }
