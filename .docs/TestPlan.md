@@ -1275,7 +1275,7 @@ ORDER_ENDPOINT=/api/v1/orders/async ORDER_MODE=async WS_SUBSCRIBERS=50 ORDER_RAT
 - `.docs/TEST_RESULTS.md`에 sync/async 비교 표 추가
 - Grafana 캡처는 sync 100 order/s, async 100 order/s 각 1장 저장
 - 개선 지표와 잔여 병목을 분리해 기록
-- 후속 선택지: OOP 리팩토링, worker throughput 개선, in-memory matching 설계
+- 후속 작업 후보: OOP 리팩토링, worker throughput 개선, in-memory matching 설계
 
 ## 18. Invariants
 
