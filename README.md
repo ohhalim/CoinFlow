@@ -1,6 +1,21 @@
 # CoinFlow
 
-거래 정합성을 우선한 암호화폐 거래소 코어를 구현하고, k6/Prometheus/Grafana 기반 부하 테스트로 Kafka/WebSocket 전파와 주문 생성 병목을 단계적으로 분리한 백엔드 프로젝트입니다.
+단일 market 주문 처리 경로에서 WebSocket broadcast, market lock, worker queue 병목을 단계적으로 분리한 거래소 백엔드 프로젝트입니다. k6/Prometheus/Grafana 기반 부하 테스트로 병목 후보를 좁히고, 오더북 broadcast lock 의존 제거와 `202 Accepted` 비동기 접수 전환으로 주문 응답 p95를 `1.43s -> 16.34ms`까지 낮췄습니다.
+
+## 핵심 결과
+
+| 지표 | Before | After | 확인 내용 |
+|---|---:|---:|---|
+| 주문 응답 p95 | `1.43s` | `16.34ms` | worker 완료 대기와 HTTP 응답 대기 분리 |
+| OrderBook broadcast max | `2.4019s` | `4.44ms` | broadcast 경로의 market lock 의존 제거 |
+| WebSocket trade feed p95 | `14.49s` | `250ms` | Outbox/Kafka 발행 cadence와 WebSocket executor 조정 |
+| 실제 주문 처리량 | `56.56 order/s` | `76.80 order/s` | 주문 생성 lock 범위 축소 |
+
+## 문제 접근
+
+- 초기 병목 후보: WebSocket broadcast, Kafka backlog, DB connection pool, market lock, worker queue
+- 측정 기준: k6 부하 조건, Prometheus scrape, Grafana 캡처, Kafka consumer lag, Hikari pending, HTTP 5xx, WebSocket/STOMP error 동시 확인
+- 개선 순서: 실시간 전파 지연 분리 -> 오더북 broadcast lock 의존 제거 -> 주문 생성 lock 범위 축소 -> HTTP 응답 대기와 worker 완료 대기 분리
 
 ## 서버 아키텍처
 
@@ -22,7 +37,6 @@
 | 정합성 기준 | 주문, 체결, 지갑, 원장이 같은 트랜잭션 경계에서 일관된 상태 유지 |
 | 측정 방식 | k6, Prometheus, Grafana로 WebSocket, Kafka, DB connection, market lock, worker queue 병목 후보 분리 |
 | 개선 흐름 | 거래 코어 MVP -> 정합성 테스트 -> Kafka/WebSocket 전파 -> 병목 계측 -> 주문 응답 구조 분리 |
-| 잔여 한계 | `202 Accepted` 전환 이후에도 worker backlog와 단일 market worker 처리량 한계 잔여 |
 
 ## 성능 개선 요약
 
@@ -51,6 +65,16 @@
 | 주문 생성 lock 경합 | `market_lock_wait` max `3.0458s` | lock 범위 축소, stage metric 추가 | max `397.38ms` |
 | 단일 market worker 한계 | queue depth 증가, worker 평균 처리 `9.73ms` | sequence DB lock 제거, command queue 지표화 | 처리량 일부 개선, backlog 잔여 |
 | HTTP 응답 대기 | sync p95 `1.43s` | `202 Accepted` 비동기 주문 접수 경로 추가 | async p95 `16.34ms` |
+
+## 설계 판단
+
+| 판단 지점 | 선택 | 근거 |
+|---|---|---|
+| 주문 응답 범위 | 기존 `201 Created` API 유지, 신규 `202 Accepted` 접수 경로 추가 | 기존 동기 응답 계약을 유지하면서 worker 완료 대기를 HTTP 응답에서 분리. 동일 조건에서 주문 응답 p95 `1.43s -> 16.34ms`, dropped iterations `255 -> 0` |
+| 접수 transaction과 worker 분리 | 접수 transaction은 주문 검증, 자산 잠금, `ACCEPTED` 주문 저장, 원장/이벤트 기록까지만 담당 | `afterCommit` 이후 queue 등록으로 worker가 커밋된 주문만 처리. queue 등록 누락/지연 시 `ACCEPTED` 주문 재조회 후 requeue |
+| worker 실패 처리 | 처리 실패 시 `ACCEPTED` 주문을 `REJECTED`로 전이하고 locked asset 해제 원장 기록 | 비동기 처리 실패 후 사용자 자산이 잠긴 상태로 남는 경우 방지 |
+| 오더북 broadcast | WebSocket snapshot 생성에서 `OrderService` market lock 의존 제거 | Kafka lag, Hikari pending, HTTP 5xx가 `0`인 조건에서 broadcast duration max `2.4019s` 관측. 오더북 내부 snapshot으로 복사 범위를 제한한 뒤 max `4.44ms` |
+| Outbox/Kafka 전파 | 주문 transaction은 domain event 저장까지만 수행하고 Kafka 발행은 Outbox Publisher가 담당 | Kafka/WebSocket 전파 실패가 주문 저장 transaction을 직접 지연시키지 않도록 분리. 측정 시 Kafka consumer lag `0` 기준으로 병목 후보 제외 |
 
 ## 비동기 주문 처리 시퀀스
 
@@ -282,6 +306,12 @@ Async 202:
 - dropped iteration: `255 -> 0`
 - 개선 범위: worker 처리량 자체 개선이 아니라 HTTP 응답 대기와 worker 완료 대기 분리
 - 잔여 병목: worker backlog, 단일 market worker 처리량 한계
+
+## 현재 한계
+
+- `202 Accepted` 전환은 HTTP 응답 대기와 worker 완료 대기 분리이며, worker 처리량 자체 개선은 아님
+- 잔여 지표: `order.command.queue.depth` max `58`, `command_queue_wait` max 약 `0.68s`
+- 추가 검증 대상: worker 처리 시간과 queue depth 상관관계, 단일 market worker 처리량 한계
 
 ## 트러블 슈팅
 
