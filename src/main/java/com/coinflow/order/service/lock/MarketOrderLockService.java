@@ -22,22 +22,22 @@ public class MarketOrderLockService {
     }
 
     public MarketOrderLockScope acquire(Market market, OrderSide side) {
-        ReentrantLock marketLock = marketOrderLockManager.getLock(market.getId());
+        return acquire(market.getId(), market.getSymbol(), side);
+    }
+
+    public MarketOrderLockScope acquire(Long marketId, String marketSymbol, OrderSide side) {
+        ReentrantLock marketLock = marketOrderLockManager.getLock(marketId);
         long marketLockWaitStartedAt = System.nanoTime();
         marketLock.lock();
         long marketLockAcquiredAt = System.nanoTime();
-        stageRecorder.record(market.getSymbol(), side, "market_lock_wait",
+        stageRecorder.record(marketSymbol, side, "market_lock_wait",
                 marketLockAcquiredAt - marketLockWaitStartedAt);
         return new MarketOrderLockScope(
-                market.getSymbol(),
+                marketSymbol,
                 side,
                 marketLock,
                 marketLockAcquiredAt,
                 stageRecorder
         );
-    }
-
-    public ReentrantLock getLock(Long marketId) {
-        return marketOrderLockManager.getLock(marketId);
     }
 }

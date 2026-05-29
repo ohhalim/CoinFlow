@@ -18,31 +18,19 @@ public class MatchingEngine {
     private final Map<String, MemoryOrderBook> orderBooks = new ConcurrentHashMap<>();
 
     public List<MatchResult> planMatch(Market market, Order taker) {
-        MemoryOrderBook book = orderBooks.computeIfAbsent(
-                market.getSymbol(),
-                k -> new MemoryOrderBook(market.getAmountScale())
-        );
-        return book.planMatch(taker);
+        return getOrCreateBook(market).planMatch(taker);
     }
 
     public List<MatchResult> planMatchRejectingSelfTrade(Market market, Order taker) {
-        MemoryOrderBook book = orderBooks.computeIfAbsent(
-                market.getSymbol(),
-                k -> new MemoryOrderBook(market.getAmountScale())
-        );
         try {
-            return book.planMatchRejectingSelfTrade(taker);
+            return getOrCreateBook(market).planMatchRejectingSelfTrade(taker);
         } catch (SelfTradeDetectedException e) {
             throw new ApiException(ErrorCode.SELF_TRADE_NOT_ALLOWED);
         }
     }
 
     public void applyMatchPlan(Market market, Order taker, List<MatchResult> plan) {
-        MemoryOrderBook book = orderBooks.computeIfAbsent(
-                market.getSymbol(),
-                k -> new MemoryOrderBook(market.getAmountScale())
-        );
-        book.applyMatchPlan(taker, plan);
+        getOrCreateBook(market).applyMatchPlan(taker, plan);
     }
 
     public void cancelOrder(String marketSymbol, Order order) {
@@ -53,11 +41,7 @@ public class MatchingEngine {
     }
 
     public void addToBook(Market market, Order order) {
-        MemoryOrderBook book = orderBooks.computeIfAbsent(
-                market.getSymbol(),
-                k -> new MemoryOrderBook(market.getAmountScale())
-        );
-        book.add(order);
+        getOrCreateBook(market).add(order);
     }
 
     public void rebuildBook(Market market, List<Order> orders) {
@@ -88,5 +72,12 @@ public class MatchingEngine {
 
     public void clearAll() {
         orderBooks.clear();
+    }
+
+    private MemoryOrderBook getOrCreateBook(Market market) {
+        return orderBooks.computeIfAbsent(
+                market.getSymbol(),
+                ignored -> new MemoryOrderBook(market.getAmountScale())
+        );
     }
 }
