@@ -15,6 +15,7 @@
 .gradle/
 .gradle-home/
 build/
+bin/
 !gradle/wrapper/gradle-wrapper.jar
 
 # Spring Boot
