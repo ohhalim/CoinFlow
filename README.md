@@ -80,35 +80,7 @@
 
 ## 비동기 주문 처리 시퀀스
 
-```mermaid
-sequenceDiagram
-    participant Client
-    participant API as OrderController
-    participant Accept as AcceptedOrderService
-    participant DB as MySQL
-    participant Queue as MarketCommandQueue
-    participant Worker as MarketWorker
-    participant Matching as MatchingEngine
-    participant Kafka
-    participant WS as WebSocket
-
-    Client->>API: POST /api/v1/orders/async
-    API->>Accept: acceptOrder(command)
-    Accept->>DB: validate market, lock wallet, save ACCEPTED order
-    Accept->>Queue: submit accepted order command
-    Accept-->>API: AcceptedOrderResponse
-    API-->>Client: 202 Accepted
-
-    Queue->>Worker: dequeue by market order
-    Worker->>DB: load ACCEPTED order
-    Worker->>Matching: match by price-time priority
-    Matching-->>Worker: match plan
-    Worker->>DB: save trades, update wallets, append ledgers, save events
-    Worker->>DB: update order status
-    Worker->>Kafka: publish domain events via outbox
-    Kafka->>WS: consume trade and orderbook events
-    WS-->>Client: trades topic and orderbook topic
-```
+![Async Order Sequence](.docs/images/async-order-sequence.png)
 
 ## 개선 사항
 
