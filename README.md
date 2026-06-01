@@ -21,15 +21,19 @@
 
 ## 서버 아키텍처
 
-![Order Processing Pipeline](.docs/images/order-processing-pipeline.png)
+![Server Architecture](.docs/images/server-architecture.png)
 
 | 구간 | 역할 |
 |---|---|
-| API | 동기 주문 생성 `201 Created`, 비동기 주문 접수 `202 Accepted` |
+| API | 비동기 주문 접수 `202 Accepted`, 주문 조회/취소, 시장/지갑/Auth REST API |
 | Queue / Worker | market별 command queue와 worker로 같은 market 주문 순서 보장 |
 | Matching | 가격-시간 우선 매칭과 인메모리 오더북 관리 |
 | Storage | MySQL에 주문, 체결, 지갑, 원장, 도메인 이벤트 기록 |
 | Event / Realtime | Outbox, Kafka, WebSocket STOMP 기반 체결/오더북 전파 |
+
+## 비동기 주문 처리 시퀀스
+
+![Async Order Sequence](.docs/images/async-order-sequence.png)
 
 ## 구현 및 검증 기준
 
@@ -49,13 +53,14 @@
 | `market_lock_wait` max | `3.0458s` | `397.38ms` | 주문 생성 lock 범위 축소 |
 | 실제 주문 처리량 | `56.56 order/s` | `76.80 order/s` | 주문 생성 lock 경합 완화 |
 | market worker 처리 평균 | `14.35ms` | `9.73ms` | DB row lock 기반 sequence 발급 제거 |
-| 주문 응답 p95 | `1.43s` | `16.34ms` | sync 201 완료 응답을 async 202 접수 응답으로 분리 |
-| dropped iterations | `255` | `0` | async 202 동일 조건 부하 기준 |
+| 주문 응답 p95 | `1.43s` | `16.34ms` | 동기 201 완료 응답과 비동기 202 접수 응답 비교 |
+| dropped iterations | `255` | `0` | 동일 조건에서 비동기 202 접수 응답 전환 후 제거 |
 
 측정 기준:
 
 - 개선 단계별 동일 시나리오 비교
-- async 202 비교 조건: `50 WebSocket subscribers / 100 order/s / 5m / DB pool 20`
+- 주문 응답 비교 기준: Before는 `POST /api/v1/orders` 동기 201 완료 응답, After는 `POST /api/v1/orders/async` 비동기 202 접수 응답
+- 비교 조건: `50 WebSocket subscribers / 100 order/s / 5m / DB pool 20`
 
 ## 병목 분석 흐름
 
@@ -66,53 +71,21 @@
 | 오더북 broadcast | broadcast max `2.4019s` | market lock 의존 제거, 오더북 내부 snapshot API 추가 | max `4.44ms` |
 | 주문 생성 lock 경합 | `market_lock_wait` max `3.0458s` | lock 범위 축소, stage metric 추가 | max `397.38ms` |
 | 단일 market worker 한계 | queue depth 증가, worker 평균 처리 `9.73ms` | sequence DB lock 제거, command queue 지표화 | 처리량 일부 개선, backlog 잔여 |
-| HTTP 응답 대기 | sync p95 `1.43s` | `202 Accepted` 비동기 주문 접수 경로 추가 | async p95 `16.34ms` |
+| HTTP 응답 대기 | 동기 201 응답 p95 `1.43s` | `202 Accepted` 비동기 주문 접수 경로 추가 | 비동기 202 응답 p95 `16.34ms` |
 
 ## 설계 판단
 
 | 판단 지점 | 선택 | 근거 |
 |---|---|---|
-| 주문 응답 범위 | 기존 `201 Created` API 유지, 신규 `202 Accepted` 접수 경로 추가 | 기존 동기 응답 계약을 유지하면서 worker 완료 대기를 HTTP 응답에서 분리. 동일 조건에서 주문 응답 p95 `1.43s -> 16.34ms`, dropped iterations `255 -> 0` |
+| 주문 응답 범위 | 기존 동기 201 완료 응답은 비교 기준으로 유지, 신규 비동기 202 접수 응답 추가 | Before는 worker 완료까지 기다린 동기 201 응답, After는 접수 transaction 이후 반환한 비동기 202 응답 기준. 동일 조건에서 주문 응답 p95 `1.43s -> 16.34ms`, dropped iterations `255 -> 0` |
 | 접수 transaction과 worker 분리 | 접수 transaction은 주문 검증, 자산 잠금, `ACCEPTED` 주문 저장, 원장/이벤트 기록까지만 담당 | `afterCommit` 이후 queue 등록으로 worker가 커밋된 주문만 처리. queue 등록 누락/지연 시 `ACCEPTED` 주문 재조회 후 requeue |
 | worker 실패 처리 | 처리 실패 시 `ACCEPTED` 주문을 `REJECTED`로 전이하고 locked asset 해제 원장 기록 | 비동기 처리 실패 후 사용자 자산이 잠긴 상태로 남는 경우 방지 |
 | 오더북 broadcast | WebSocket snapshot 생성에서 `OrderService` market lock 의존 제거 | Kafka lag, Hikari pending, HTTP 5xx가 `0`인 조건에서 broadcast duration max `2.4019s` 관측. 오더북 내부 snapshot으로 복사 범위를 제한한 뒤 max `4.44ms` |
 | Outbox/Kafka 전파 | 주문 transaction은 domain event 저장까지만 수행하고 Kafka 발행은 Outbox Publisher가 담당 | Kafka/WebSocket 전파 실패가 주문 저장 transaction을 직접 지연시키지 않도록 분리. 측정 시 Kafka consumer lag `0` 기준으로 병목 후보 제외 |
 
-## 비동기 주문 처리 시퀀스
+## 병목 분리 및 검증 기록
 
-```mermaid
-sequenceDiagram
-    participant Client
-    participant API as OrderController
-    participant Accept as AcceptedOrderService
-    participant DB as MySQL
-    participant Queue as MarketCommandQueue
-    participant Worker as MarketWorker
-    participant Matching as MatchingEngine
-    participant Kafka
-    participant WS as WebSocket
-
-    Client->>API: POST /api/v1/orders/async
-    API->>Accept: acceptOrder(command)
-    Accept->>DB: validate market, lock wallet, save ACCEPTED order
-    Accept->>Queue: submit accepted order command
-    Accept-->>API: AcceptedOrderResponse
-    API-->>Client: 202 Accepted
-
-    Queue->>Worker: dequeue by market order
-    Worker->>DB: load ACCEPTED order
-    Worker->>Matching: match by price-time priority
-    Matching-->>Worker: match plan
-    Worker->>DB: save trades, update wallets, append ledgers, save events
-    Worker->>DB: update order status
-    Worker->>Kafka: publish domain events via outbox
-    Kafka->>WS: consume trade and orderbook events
-    WS-->>Client: trades topic and orderbook topic
-```
-
-## 개선 사항
-
-### 1. 거래 정합성 보강
+### 1. 거래 정합성 기준선 확보
 
 확인 범위:
 
@@ -133,7 +106,7 @@ sequenceDiagram
 - Kafka/WebSocket 외부 전파와 독립적인 거래 코어 기준선 확보
 - DB 상태 기준 오더북 복구 경로 검증
 
-### 2. WebSocket/Kafka 실시간 전파 병목 개선
+### 2. WebSocket/Kafka 실시간 전파 병목 분리
 
 측정 결과:
 
@@ -159,7 +132,7 @@ sequenceDiagram
 | Kafka consumer lag | `0` | `0` |
 | Server errors | `0` | `0` |
 
-### 3. 오더북 브로드캐스트 락 경합 개선
+### 3. 오더북 브로드캐스트 락 경합 분리
 
 측정 결과:
 
@@ -257,6 +230,7 @@ After:
 측정 결과:
 
 - 동기 주문 생성 API 응답 범위: 잔고 잠금, 매칭, 체결 저장, 지갑 정산, 원장 저장, 이벤트 저장
+- 비교 기준: 기존 `POST /api/v1/orders` 동기 201 완료 응답 vs 신규 `POST /api/v1/orders/async` 비동기 202 접수 응답
 - market별 command queue 도입 이후 `market_lock_wait` 주요 병목 제외
 - `100 order/s` 조건에서 HTTP 응답이 worker queue 대기 시간에 영향
 - 제외 후보: Hikari pending, Kafka consumer lag, HTTP 5xx, WebSocket/STOMP error
