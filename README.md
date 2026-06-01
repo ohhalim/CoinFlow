@@ -21,7 +21,7 @@
 
 ## 서버 아키텍처
 
-![Order Processing Pipeline](.docs/images/order-processing-pipeline.png)
+![Server Architecture](.docs/images/server-architecture.png)
 
 | 구간 | 역할 |
 |---|---|
@@ -30,6 +30,10 @@
 | Matching | 가격-시간 우선 매칭과 인메모리 오더북 관리 |
 | Storage | MySQL에 주문, 체결, 지갑, 원장, 도메인 이벤트 기록 |
 | Event / Realtime | Outbox, Kafka, WebSocket STOMP 기반 체결/오더북 전파 |
+
+## 비동기 주문 처리 시퀀스
+
+![Async Order Sequence](.docs/images/async-order-sequence.png)
 
 ## 구현 및 검증 기준
 
@@ -78,41 +82,9 @@
 | 오더북 broadcast | WebSocket snapshot 생성에서 `OrderService` market lock 의존 제거 | Kafka lag, Hikari pending, HTTP 5xx가 `0`인 조건에서 broadcast duration max `2.4019s` 관측. 오더북 내부 snapshot으로 복사 범위를 제한한 뒤 max `4.44ms` |
 | Outbox/Kafka 전파 | 주문 transaction은 domain event 저장까지만 수행하고 Kafka 발행은 Outbox Publisher가 담당 | Kafka/WebSocket 전파 실패가 주문 저장 transaction을 직접 지연시키지 않도록 분리. 측정 시 Kafka consumer lag `0` 기준으로 병목 후보 제외 |
 
-## 비동기 주문 처리 시퀀스
+## 병목 분리 및 검증 기록
 
-```mermaid
-sequenceDiagram
-    participant Client
-    participant API as OrderController
-    participant Accept as AcceptedOrderService
-    participant DB as MySQL
-    participant Queue as MarketCommandQueue
-    participant Worker as MarketWorker
-    participant Matching as MatchingEngine
-    participant Kafka
-    participant WS as WebSocket
-
-    Client->>API: POST /api/v1/orders/async
-    API->>Accept: acceptOrder(command)
-    Accept->>DB: validate market, lock wallet, save ACCEPTED order
-    Accept->>Queue: submit accepted order command
-    Accept-->>API: AcceptedOrderResponse
-    API-->>Client: 202 Accepted
-
-    Queue->>Worker: dequeue by market order
-    Worker->>DB: load ACCEPTED order
-    Worker->>Matching: match by price-time priority
-    Matching-->>Worker: match plan
-    Worker->>DB: save trades, update wallets, append ledgers, save events
-    Worker->>DB: update order status
-    Worker->>Kafka: publish domain events via outbox
-    Kafka->>WS: consume trade and orderbook events
-    WS-->>Client: trades topic and orderbook topic
-```
-
-## 개선 사항
-
-### 1. 거래 정합성 보강
+### 1. 거래 정합성 기준선 확보
 
 확인 범위:
 
@@ -133,7 +105,7 @@ sequenceDiagram
 - Kafka/WebSocket 외부 전파와 독립적인 거래 코어 기준선 확보
 - DB 상태 기준 오더북 복구 경로 검증
 
-### 2. WebSocket/Kafka 실시간 전파 병목 개선
+### 2. WebSocket/Kafka 실시간 전파 병목 분리
 
 측정 결과:
 
@@ -159,7 +131,7 @@ sequenceDiagram
 | Kafka consumer lag | `0` | `0` |
 | Server errors | `0` | `0` |
 
-### 3. 오더북 브로드캐스트 락 경합 개선
+### 3. 오더북 브로드캐스트 락 경합 분리
 
 측정 결과:
 
