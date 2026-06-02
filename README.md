@@ -159,7 +159,7 @@
 
 Before:
 
-![Before orderbook broadcast lock contention](.docs/images/before-orderbook-lock-contention.png)
+![Before orderbook broadcast lock contention](.docs/images/readme-orderbook-broadcast-before.png)
 
 개선 작업:
 
@@ -171,7 +171,7 @@ Before:
 
 After:
 
-![After orderbook broadcast lock contention](.docs/images/after-orderbook-lock-contention.png)
+![After orderbook broadcast lock contention](.docs/images/readme-orderbook-broadcast-after.png)
 
 결과:
 
@@ -206,14 +206,6 @@ After:
 - `clientOrderId` 사전 중복 조회를 market lock 밖으로 이동
 - DB unique constraint 기반 중복 방어 유지
 - 동일 조건 5분 부하로 유지 처리량 측정
-
-Before:
-
-![Before order create lock scope 5m load test](.docs/images/order-create-lock-scope-before-5m.png)
-
-After:
-
-![After order create lock scope 5m load test](.docs/images/order-create-lock-scope-after-5m.png)
 
 전후 비교:
 
@@ -253,7 +245,7 @@ After:
 
 Sync 201:
 
-![Sync order load 201](.docs/images/sync-order-load-201.png)
+![Sync order load 201](.docs/images/readme-http-p95-sync-201.png)
 
 개선 작업:
 
@@ -266,7 +258,7 @@ Sync 201:
 
 Async 202:
 
-![Async order load 202](.docs/images/async-order-load-202.png)
+![Async order load 202](.docs/images/readme-http-p95-async-202.png)
 
 전후 비교:
 
