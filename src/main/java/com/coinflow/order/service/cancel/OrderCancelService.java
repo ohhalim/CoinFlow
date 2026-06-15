@@ -7,8 +7,7 @@ import com.coinflow.order.domain.Order;
 import com.coinflow.order.dto.CancelOrderResponse;
 import com.coinflow.order.matching.MatchingEngine;
 import com.coinflow.order.repository.OrderRepository;
-import com.coinflow.order.service.lock.MarketOrderLockScope;
-import com.coinflow.order.service.lock.MarketOrderLockService;
+import com.coinflow.order.service.command.MarketOrderCommandQueue;
 import com.coinflow.wallet.domain.LedgerType;
 import com.coinflow.wallet.service.WalletOrderOperationService;
 import lombok.extern.slf4j.Slf4j;
@@ -28,7 +27,7 @@ public class OrderCancelService {
     private final WalletOrderOperationService walletOrderOperationService;
     private final MatchingEngine matchingEngine;
     private final DomainEventRecorder eventRecorder;
-    private final MarketOrderLockService marketOrderLockService;
+    private final MarketOrderCommandQueue marketOrderCommandQueue;
     private final TransactionTemplate transactionTemplate;
 
     public OrderCancelService(
@@ -36,14 +35,14 @@ public class OrderCancelService {
             WalletOrderOperationService walletOrderOperationService,
             MatchingEngine matchingEngine,
             DomainEventRecorder eventRecorder,
-            MarketOrderLockService marketOrderLockService,
+            MarketOrderCommandQueue marketOrderCommandQueue,
             PlatformTransactionManager transactionManager
     ) {
         this.orderRepository = orderRepository;
         this.walletOrderOperationService = walletOrderOperationService;
         this.matchingEngine = matchingEngine;
         this.eventRecorder = eventRecorder;
-        this.marketOrderLockService = marketOrderLockService;
+        this.marketOrderCommandQueue = marketOrderCommandQueue;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
@@ -52,16 +51,12 @@ public class OrderCancelService {
                 .orElseThrow(() -> new ApiException(ErrorCode.ORDER_NOT_FOUND));
         if (!order.isCancelable()) throw new ApiException(ErrorCode.ORDER_NOT_CANCELABLE);
 
-        MarketOrderLockScope marketLockScope = marketOrderLockService.acquire(
+        return marketOrderCommandQueue.submit(
                 order.getMarketId(),
                 order.getMarketSymbol(),
-                order.getSide()
+                order.getSide(),
+                () -> transactionTemplate.execute(status -> cancelInTransaction(currentUserId, orderId))
         );
-        try {
-            return transactionTemplate.execute(status -> cancelInTransaction(currentUserId, orderId));
-        } finally {
-            marketLockScope.release();
-        }
     }
 
     private CancelOrderResponse cancelInTransaction(Long currentUserId, Long orderId) {

@@ -13,8 +13,6 @@ import com.coinflow.order.matching.MatchingEngine;
 import com.coinflow.order.matching.OrderBookRecoveryService;
 import com.coinflow.order.repository.OrderRepository;
 import com.coinflow.order.service.command.CreateOrderCommand;
-import com.coinflow.order.service.lock.MarketOrderLockScope;
-import com.coinflow.order.service.lock.MarketOrderLockService;
 import com.coinflow.order.service.lock.OrderAssetLockService;
 import com.coinflow.order.service.metrics.OrderCreateStageRecorder;
 import com.coinflow.order.service.metrics.OrderTransactionLifecycleRecorder;
@@ -34,7 +32,6 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 @Slf4j
 @Service
@@ -48,7 +45,6 @@ public class SyncOrderProcessor {
     private final OrderSettlementService orderSettlementService;
     private final MarketSequenceAllocator marketSequenceAllocator;
     private final OrderCreateStageRecorder stageRecorder;
-    private final MarketOrderLockService marketOrderLockService;
     private final OrderTransactionLifecycleRecorder transactionLifecycleRecorder;
     private final ClientOrderIdService clientOrderIdService;
     private final TransactionTemplate transactionTemplate;
@@ -62,7 +58,6 @@ public class SyncOrderProcessor {
             OrderSettlementService orderSettlementService,
             MarketSequenceAllocator marketSequenceAllocator,
             OrderCreateStageRecorder stageRecorder,
-            MarketOrderLockService marketOrderLockService,
             OrderTransactionLifecycleRecorder transactionLifecycleRecorder,
             ClientOrderIdService clientOrderIdService,
             PlatformTransactionManager transactionManager
@@ -75,7 +70,6 @@ public class SyncOrderProcessor {
         this.orderSettlementService = orderSettlementService;
         this.marketSequenceAllocator = marketSequenceAllocator;
         this.stageRecorder = stageRecorder;
-        this.marketOrderLockService = marketOrderLockService;
         this.transactionLifecycleRecorder = transactionLifecycleRecorder;
         this.clientOrderIdService = clientOrderIdService;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
@@ -89,8 +83,6 @@ public class SyncOrderProcessor {
             long createStartedAt
     ) {
         OrderSide side = command.side();
-        MarketOrderLockScope marketLockScope = marketOrderLockService.acquire(market, side);
-        AtomicBoolean releaseRegistered = new AtomicBoolean(false);
 
         long transactionTemplateStartedAt = System.nanoTime();
         OrderTransactionLifecycleRecorder.Metrics transactionMetrics = transactionLifecycleRecorder.start(
@@ -103,8 +95,6 @@ public class SyncOrderProcessor {
                         market,
                         command,
                         side,
-                        marketLockScope,
-                        releaseRegistered,
                         transactionMetrics
                 ));
             } catch (DataIntegrityViolationException e) {
@@ -114,9 +104,6 @@ public class SyncOrderProcessor {
                 throw e;
             }
         } finally {
-            if (!releaseRegistered.get()) {
-                marketLockScope.release();
-            }
             long transactionTemplateFinishedAt = System.nanoTime();
             stageRecorder.record(market.getSymbol(), side, "transaction_template",
                     transactionTemplateFinishedAt - transactionTemplateStartedAt);
@@ -132,8 +119,6 @@ public class SyncOrderProcessor {
             Market market,
             CreateOrderCommand command,
             OrderSide side,
-            MarketOrderLockScope marketLockScope,
-            AtomicBoolean releaseRegistered,
             OrderTransactionLifecycleRecorder.Metrics transactionMetrics
     ) {
         transactionMetrics.recordCallbackStarted();
@@ -166,10 +151,8 @@ public class SyncOrderProcessor {
                     order,
                     plan,
                     autoCanceledMakers,
-                    marketLockScope,
                     transactionMetrics
             );
-            releaseRegistered.set(true);
 
             return CreateOrderResponse.of(order, trades);
         } finally {
@@ -218,7 +201,6 @@ public class SyncOrderProcessor {
             Order order,
             List<MatchResult> plan,
             List<Order> autoCanceledMakers,
-            MarketOrderLockScope marketLockScope,
             OrderTransactionLifecycleRecorder.Metrics transactionMetrics
     ) {
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
@@ -246,7 +228,6 @@ public class SyncOrderProcessor {
                 } finally {
                     stageRecorder.record(market.getSymbol(), side, "orderbook_after_commit",
                             System.nanoTime() - orderBookApplyStartedAt);
-                    marketLockScope.release();
                     transactionMetrics.recordAfterCommitFinished();
                 }
             }
@@ -254,7 +235,6 @@ public class SyncOrderProcessor {
             @Override
             public void afterCompletion(int status) {
                 transactionMetrics.recordAfterCompletionStarted();
-                marketLockScope.release();
                 transactionMetrics.recordAfterCompletionFinished();
             }
         });
