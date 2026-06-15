@@ -14,7 +14,6 @@ import com.coinflow.order.repository.OrderRepository;
 import com.coinflow.order.service.command.CreateOrderCommand;
 import com.coinflow.order.service.command.MarketOrderCommandQueue;
 import com.coinflow.order.service.lock.OrderAssetLockService;
-import com.coinflow.order.service.metrics.OrderCreateStageRecorder;
 import com.coinflow.order.service.processor.AcceptedOrderProcessor;
 import com.coinflow.order.service.support.ClientOrderIdService;
 import com.coinflow.order.service.support.MarketSequenceAllocator;
@@ -38,7 +37,6 @@ public class AcceptedOrderService {
     private final OrderAssetLockService orderAssetLockService;
     private final MarketOrderCommandQueue marketOrderCommandQueue;
     private final MarketSequenceAllocator marketSequenceAllocator;
-    private final OrderCreateStageRecorder stageRecorder;
     private final AcceptedOrderProcessor acceptedOrderProcessor;
     private final ClientOrderIdService clientOrderIdService;
     private final TransactionTemplate transactionTemplate;
@@ -51,7 +49,6 @@ public class AcceptedOrderService {
             OrderAssetLockService orderAssetLockService,
             MarketOrderCommandQueue marketOrderCommandQueue,
             MarketSequenceAllocator marketSequenceAllocator,
-            OrderCreateStageRecorder stageRecorder,
             AcceptedOrderProcessor acceptedOrderProcessor,
             ClientOrderIdService clientOrderIdService,
             PlatformTransactionManager transactionManager
@@ -63,7 +60,6 @@ public class AcceptedOrderService {
         this.orderAssetLockService = orderAssetLockService;
         this.marketOrderCommandQueue = marketOrderCommandQueue;
         this.marketSequenceAllocator = marketSequenceAllocator;
-        this.stageRecorder = stageRecorder;
         this.acceptedOrderProcessor = acceptedOrderProcessor;
         this.clientOrderIdService = clientOrderIdService;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
@@ -112,10 +108,7 @@ public class AcceptedOrderService {
     ) {
         clientOrderIdService.validateUnique(currentUserId, request, market, side);
 
-        Long sequence = stageRecorder.record(
-                market.getSymbol(), side, "sequence_allocate",
-                () -> marketSequenceAllocator.nextSequence(market.getId())
-        );
+        Long sequence = marketSequenceAllocator.nextSequence(market.getId());
         Wallet wallet = orderAssetLockService.lockTakerWallet(currentUserId, command);
         Order order = Order.accepted(
                 currentUserId, market.getId(), market.getSymbol(),
@@ -124,15 +117,11 @@ public class AcceptedOrderService {
                 command.lockedAsset(), command.lockedAmount(),
                 sequence, request.clientOrderId()
         );
-        stageRecorder.record(market.getSymbol(), side, "order_save",
-                () -> orderRepository.save(order));
+        orderRepository.save(order);
 
         WalletLedger orderLockLedger = orderAssetLockService.createOrderLockLedger(wallet, order, command);
         orderAssetLockService.saveOrderLockLedger(orderLockLedger, command);
-        stageRecorder.record(market.getSymbol(), side, "order_accepted_event_save", () -> {
-            eventRecorder.recordOrderAccepted(order);
-            return null;
-        });
+        eventRecorder.recordOrderAccepted(order);
 
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
@@ -148,7 +137,7 @@ public class AcceptedOrderService {
                 market,
                 side,
                 orderId,
-                () -> acceptedOrderProcessor.processAcceptedOrder(market, side, orderId)
+                () -> acceptedOrderProcessor.processAcceptedOrder(market, orderId)
         );
     }
 
