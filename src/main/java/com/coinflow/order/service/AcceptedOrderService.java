@@ -148,7 +148,7 @@ public class AcceptedOrderService {
                 market,
                 side,
                 orderId,
-                () -> acceptedOrderProcessor.processAcceptedOrder(market, side, orderId)
+                () -> acceptedOrderProcessor.processAcceptedOrder(market, orderId)
         );
     }
 

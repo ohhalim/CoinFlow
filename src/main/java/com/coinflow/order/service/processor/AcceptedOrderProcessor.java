@@ -5,13 +5,11 @@ import com.coinflow.common.exception.ErrorCode;
 import com.coinflow.event.service.DomainEventRecorder;
 import com.coinflow.market.domain.Market;
 import com.coinflow.order.domain.Order;
-import com.coinflow.order.domain.OrderSide;
 import com.coinflow.order.domain.OrderStatus;
 import com.coinflow.order.matching.MatchResult;
 import com.coinflow.order.matching.MatchingEngine;
 import com.coinflow.order.matching.OrderBookRecoveryService;
 import com.coinflow.order.repository.OrderRepository;
-import com.coinflow.order.service.metrics.OrderCreateStageRecorder;
 import com.coinflow.order.service.settlement.OrderSettlementService;
 import com.coinflow.trade.domain.Trade;
 import com.coinflow.wallet.domain.LedgerType;
@@ -37,7 +35,6 @@ public class AcceptedOrderProcessor {
     private final OrderBookRecoveryService orderBookRecoveryService;
     private final DomainEventRecorder eventRecorder;
     private final OrderSettlementService orderSettlementService;
-    private final OrderCreateStageRecorder stageRecorder;
     private final TransactionTemplate transactionTemplate;
 
     public AcceptedOrderProcessor(
@@ -47,7 +44,6 @@ public class AcceptedOrderProcessor {
             OrderBookRecoveryService orderBookRecoveryService,
             DomainEventRecorder eventRecorder,
             OrderSettlementService orderSettlementService,
-            OrderCreateStageRecorder stageRecorder,
             PlatformTransactionManager transactionManager
     ) {
         this.orderRepository = orderRepository;
@@ -56,20 +52,19 @@ public class AcceptedOrderProcessor {
         this.orderBookRecoveryService = orderBookRecoveryService;
         this.eventRecorder = eventRecorder;
         this.orderSettlementService = orderSettlementService;
-        this.stageRecorder = stageRecorder;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
-    public void processAcceptedOrder(Market market, OrderSide side, Long orderId) {
+    public void processAcceptedOrder(Market market, Long orderId) {
         try {
-            processAcceptedOrderInternal(market, side, orderId);
+            processAcceptedOrderInternal(market, orderId);
         } catch (Throwable e) {
             log.warn("Accepted order processing failed. orderId={}, error={}", orderId, e.getMessage(), e);
             rejectAcceptedOrder(orderId, e.getClass().getSimpleName());
         }
     }
 
-    private void processAcceptedOrderInternal(Market market, OrderSide side, Long orderId) {
+    private void processAcceptedOrderInternal(Market market, Long orderId) {
         transactionTemplate.execute(status -> {
             Order order = orderRepository.findByIdWithLock(orderId)
                     .orElseThrow(() -> new ApiException(ErrorCode.ORDER_NOT_FOUND));
@@ -78,34 +73,33 @@ public class AcceptedOrderProcessor {
             }
 
             order.open();
-            List<MatchResult> plan = stageRecorder.record(
-                    market.getSymbol(), side, "matching_plan",
-                    () -> matchingEngine.planMatchRejectingSelfTrade(market, order)
-            );
+            List<MatchResult> plan = matchingEngine.planMatchRejectingSelfTrade(market, order);
             List<Order> autoCanceledMakers = new ArrayList<>();
-            List<Trade> trades = stageRecorder.record(
-                    market.getSymbol(), side, "settlement",
-                    () -> orderSettlementService.settle(market, order, plan, autoCanceledMakers, null, false)
-            );
+            List<Trade> trades = orderSettlementService.settle(market, order, plan, autoCanceledMakers, null, false);
 
-            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                @Override
-                public void afterCommit() {
-                    long orderBookApplyStartedAt = System.nanoTime();
-                    try {
-                        matchingEngine.applyMatchPlan(market, order, plan);
-                        autoCanceledMakers.forEach(canceledMaker ->
-                                matchingEngine.cancelOrder(market.getSymbol(), canceledMaker));
-                    } catch (Exception e) {
-                        log.error("오더북 applyMatchPlan 실패: orderId={}, DB 체결 내역 기반 재빌드 시도", order.getId(), e);
-                        orderBookRecoveryService.rebuildAfterApplyFailure(market.getId());
-                    } finally {
-                        stageRecorder.record(market.getSymbol(), side, "orderbook_after_commit",
-                                System.nanoTime() - orderBookApplyStartedAt);
-                    }
-                }
-            });
+            registerOrderBookSynchronization(market, order, plan, autoCanceledMakers);
             return trades;
+        });
+    }
+
+    private void registerOrderBookSynchronization(
+            Market market,
+            Order order,
+            List<MatchResult> plan,
+            List<Order> autoCanceledMakers
+    ) {
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                try {
+                    matchingEngine.applyMatchPlan(market, order, plan);
+                    autoCanceledMakers.forEach(canceledMaker ->
+                            matchingEngine.cancelOrder(market.getSymbol(), canceledMaker));
+                } catch (Exception e) {
+                    log.error("오더북 applyMatchPlan 실패: orderId={}, DB 체결 내역 기반 재빌드 시도", order.getId(), e);
+                    orderBookRecoveryService.rebuildAfterApplyFailure(market.getId());
+                }
+            }
         });
     }
 
@@ -130,5 +124,4 @@ public class AcceptedOrderProcessor {
             return null;
         });
     }
-
 }

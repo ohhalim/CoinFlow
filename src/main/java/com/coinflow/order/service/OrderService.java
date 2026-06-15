@@ -55,8 +55,6 @@ public class OrderService {
     }
 
     public CreateOrderResponse createOrder(Long currentUserId, CreateOrderRequest request) {
-        long createStartedAt = System.nanoTime();
-
         Market market = marketRepository.findBySymbol(request.market())
                 .orElseThrow(() -> new ApiException(ErrorCode.MARKET_NOT_FOUND));
         CreateOrderCommand command = orderCreateValidator.validate(market, request);
@@ -66,7 +64,7 @@ public class OrderService {
         return marketOrderCommandQueue.submit(
                 market,
                 side,
-                () -> syncOrderProcessor.process(currentUserId, request, market, command, createStartedAt)
+                () -> syncOrderProcessor.process(currentUserId, request, market, command)
         );
     }
 
