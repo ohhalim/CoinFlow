@@ -29,11 +29,15 @@ public class MarketOrderCommandQueue {
     }
 
     public <T> T submit(Market market, OrderSide side, Supplier<T> command) {
+        return submit(market.getId(), market.getSymbol(), side, command);
+    }
+
+    public <T> T submit(Long marketId, String marketSymbol, OrderSide side, Supplier<T> command) {
         MarketWorker worker = workers.computeIfAbsent(
-                market.getId(),
-                ignored -> new MarketWorker(market.getSymbol())
+                marketId,
+                ignored -> new MarketWorker(marketSymbol)
         );
-        QueuedCommand<T> queuedCommand = new QueuedCommand<>(market.getSymbol(), side, command);
+        QueuedCommand<T> queuedCommand = new QueuedCommand<>(marketSymbol, side, command);
         worker.submit(queuedCommand);
         return queuedCommand.await();
     }
