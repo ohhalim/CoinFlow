@@ -26,8 +26,10 @@ import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.util.Map;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isA;
@@ -92,6 +94,8 @@ class WebSocketTradeFeedIntegrationTest {
         createOrder(buyerToken, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000", "0.0001", null);
         createOrder(sellerToken, "BTC-KRW", "SELL", "LIMIT", "GTC", "100000000", "0.0001", null);
 
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(tradeRepository.count()).isEqualTo(1));
         outboxPublisher.publishPendingEvents();
 
         await().untilAsserted(() -> verify(messagingTemplate)

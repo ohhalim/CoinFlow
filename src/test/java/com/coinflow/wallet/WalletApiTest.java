@@ -26,7 +26,10 @@ import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 
+import java.time.Duration;
+
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 @SuppressWarnings({"rawtypes", "unchecked"})
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
@@ -195,6 +198,9 @@ class WalletApiTest {
 
         createOrder(buyerToken, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000", "0.0001", null);
         createOrder(sellerToken, "BTC-KRW", "SELL", "LIMIT", "GTC", "100000000", "0.0001", null);
+
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(tradeRepository.count()).isEqualTo(1));
 
         var buyer = userRepository.findByEmail("wallet006a@example.com").orElseThrow();
         var seller = userRepository.findByEmail("wallet006b@example.com").orElseThrow();

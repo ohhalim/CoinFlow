@@ -39,6 +39,7 @@ import java.util.UUID;
 import java.util.stream.StreamSupport;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 @SuppressWarnings("rawtypes")
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
@@ -112,6 +113,9 @@ class KafkaPublishingIntegrationTest {
 
         createOrder(buyerToken, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000", "0.0001", null);
         createOrder(sellerToken, "BTC-KRW", "SELL", "LIMIT", "GTC", "100000000", "0.0001", null);
+
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(tradeRepository.count()).isEqualTo(1));
 
         assertThat(domainEventRepository.findAllByPublishedFalseOrderByIdAsc()).isNotEmpty();
 

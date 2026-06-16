@@ -21,10 +21,12 @@ import org.springframework.context.annotation.Import;
 import org.springframework.http.*;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 @SuppressWarnings("rawtypes")
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
@@ -80,9 +82,12 @@ class MatchingSettlementTest {
 
         // taker: BUY at 100,000,000 → locks 10,000 KRW, matches at 9,800 KRW
         var buyResponse = createOrder(buyerToken, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000", "0.0001", null);
+        Long buyOrderId = ((Number) buyResponse.getBody().get("orderId")).longValue();
 
-        assertThat(buyResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
-        assertThat(buyResponse.getBody().get("status")).isEqualTo("FILLED");
+        assertThat(buyResponse.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(orderRepository.findById(buyOrderId).orElseThrow().getStatus().name()).isEqualTo("FILLED")
+        );
 
         var buyer  = userRepository.findByEmail("set001-buyer@example.com").orElseThrow();
         var seller = userRepository.findByEmail("set001-seller@example.com").orElseThrow();
@@ -128,12 +133,13 @@ class MatchingSettlementTest {
 
         // taker BUY 0.0002 → fully filled across two makers
         var buyResponse = createOrder(buyerToken, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000", "0.0002", null);
+        Long buyOrderId = ((Number) buyResponse.getBody().get("orderId")).longValue();
 
-        assertThat(buyResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
-        assertThat(buyResponse.getBody().get("status")).isEqualTo("FILLED");
-
-        var trades = (List<?>) buyResponse.getBody().get("trades");
-        assertThat(trades).hasSize(2);
+        assertThat(buyResponse.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            assertThat(orderRepository.findById(buyOrderId).orElseThrow().getStatus().name()).isEqualTo("FILLED");
+            assertThat(tradeRepository.count()).isEqualTo(2);
+        });
 
         var buyer = userRepository.findByEmail("set001b-buyer@example.com").orElseThrow();
         var buyerKrw = findWallet(buyer.getId(), "KRW");
@@ -159,9 +165,12 @@ class MatchingSettlementTest {
 
         // taker: SELL → 전량 체결
         var sellResponse = createOrder(sellerToken, "BTC-KRW", "SELL", "LIMIT", "GTC", "100000000", "0.0001", null);
+        Long sellOrderId = ((Number) sellResponse.getBody().get("orderId")).longValue();
 
-        assertThat(sellResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
-        assertThat(sellResponse.getBody().get("status")).isEqualTo("FILLED");
+        assertThat(sellResponse.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(orderRepository.findById(sellOrderId).orElseThrow().getStatus().name()).isEqualTo("FILLED")
+        );
 
         var buyer  = userRepository.findByEmail("set002-buyer@example.com").orElseThrow();
         var seller = userRepository.findByEmail("set002-seller@example.com").orElseThrow();
@@ -198,13 +207,16 @@ class MatchingSettlementTest {
         // user1 SELL at 100,000,000 (자기 주문)
         createOrder(user1Token, "BTC-KRW", "SELL", "LIMIT", "GTC", "100000000", "0.0001", null);
 
-        // user1 BUY at 100,000,000 → user1 자신의 SELL과 가격 교차 → 거절
+        // user1 BUY at 100,000,000 → user1 자신의 SELL과 가격 교차 → 비동기 워커에서 거절
         var buyResponse = createOrder(user1Token, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000", "0.0001", null);
+        Long buyOrderId = ((Number) buyResponse.getBody().get("orderId")).longValue();
 
-        assertThat(buyResponse.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
-        assertThat(buyResponse.getBody().get("code")).isEqualTo("SELF_TRADE_NOT_ALLOWED");
+        assertThat(buyResponse.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(orderRepository.findById(buyOrderId).orElseThrow().getStatus().name()).isEqualTo("REJECTED")
+        );
 
-        // user1 KRW 잔고 변동 없음 (주문 거절 → lock 없음)
+        // user1 KRW 잔고 변동 없음 (주문 거절 → lock 해제됨)
         var user1 = userRepository.findByEmail("set005-user1@example.com").orElseThrow();
         var user1Krw = findWallet(user1.getId(), "KRW");
         assertThat(user1Krw.getLockedBalance()).isEqualByComparingTo("0");
@@ -228,7 +240,10 @@ class MatchingSettlementTest {
         // taker: BUY 0.0002 → 0.0001만 체결, 나머지 OPEN
         var buyResponse = createOrder(buyerToken, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000", "0.0002", null);
         Long buyOrderId = ((Number) buyResponse.getBody().get("orderId")).longValue();
-        assertThat(buyResponse.getBody().get("status")).isEqualTo("PARTIALLY_FILLED");
+
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(orderRepository.findById(buyOrderId).orElseThrow().getStatus().name()).isEqualTo("PARTIALLY_FILLED")
+        );
 
         var buyer = userRepository.findByEmail("can002-buyer@example.com").orElseThrow();
         var buyerKrw = findWallet(buyer.getId(), "KRW");
@@ -268,14 +283,13 @@ class MatchingSettlementTest {
 
         // BUY at 100,000,000 → seller3(98,000,000)과 체결
         var buyResponse = createOrder(buyerToken, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000", "0.0001", null);
+        Long buyOrderId = ((Number) buyResponse.getBody().get("orderId")).longValue();
 
-        assertThat(buyResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
-        assertThat(buyResponse.getBody().get("status")).isEqualTo("FILLED");
-
-        var trades = (List<?>) buyResponse.getBody().get("trades");
-        assertThat(trades).hasSize(1);
-        var trade = (Map<?, ?>) trades.get(0);
-        assertThat(trade.get("price")).isEqualTo("98000000"); // 최저가 체결
+        assertThat(buyResponse.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            assertThat(orderRepository.findById(buyOrderId).orElseThrow().getStatus().name()).isEqualTo("FILLED");
+            assertThat(tradeRepository.count()).isEqualTo(1);
+        });
 
         // buyer: 9,800 KRW 지출, 200 환불, 0.0001 BTC 수령
         var buyer = userRepository.findByEmail("mat001-buyer@example.com").orElseThrow();
@@ -312,11 +326,13 @@ class MatchingSettlementTest {
 
         // buyer1: BUY 1.0 BTC at 9999 → partial fill, seller 잔여 0.0001 BTC
         var buyer1Response = createOrder(buyer1Token, "BTC-KRW", "BUY", "LIMIT", "GTC", "9999", "1.0000", null);
-        assertThat(buyer1Response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
-        assertThat(buyer1Response.getBody().get("status")).isEqualTo("FILLED");
+        Long buyer1OrderId = ((Number) buyer1Response.getBody().get("orderId")).longValue();
 
-        var sellerOrder = orderRepository.findById(sellOrderId).orElseThrow();
-        assertThat(sellerOrder.getStatus().name()).isEqualTo("CANCELED");
+        assertThat(buyer1Response.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            assertThat(orderRepository.findById(buyer1OrderId).orElseThrow().getStatus().name()).isEqualTo("FILLED");
+            assertThat(orderRepository.findById(sellOrderId).orElseThrow().getStatus().name()).isEqualTo("CANCELED");
+        });
 
         var seller = userRepository.findByEmail("zq001-seller@example.com").orElseThrow();
         assertThat(findWallet(seller.getId(), "BTC").getAvailableBalance())
@@ -329,8 +345,12 @@ class MatchingSettlementTest {
 
         // buyer2: 남은 SELL이 없으므로 OPEN 등록, 신규 체결 없음
         var buyer2Response = createOrder(buyer2Token, "BTC-KRW", "BUY", "LIMIT", "GTC", "9999", "10", null);
-        assertThat(buyer2Response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
-        assertThat(buyer2Response.getBody().get("status")).isEqualTo("OPEN");
+        Long buyer2OrderId = ((Number) buyer2Response.getBody().get("orderId")).longValue();
+
+        assertThat(buyer2Response.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(orderRepository.findById(buyer2OrderId).orElseThrow().getStatus().name()).isEqualTo("OPEN")
+        );
 
         // buyer2와 신규 체결 없음
         assertThat(tradeRepository.count()).isEqualTo(tradeCountBefore);
@@ -342,11 +362,19 @@ class MatchingSettlementTest {
     void INVARIANT_체결_후_모든_지갑_잔고_음수_불가() {
         String buyerToken  = signupAndLogin("inv001-buyer@example.com");
         String sellerToken = signupAndLogin("inv001-seller@example.com");
-        depositKrw("inv001-buyer@example.com",  new BigDecimal("98000"));
+        // BUY lock = 100,000,000 × 0.001 = 100,000 KRW
+        depositKrw("inv001-buyer@example.com",  new BigDecimal("100000"));
         depositBtc("inv001-seller@example.com", new BigDecimal("0.01"));
 
-        createOrder(sellerToken, "BTC-KRW", "SELL", "LIMIT", "GTC", "98000000", "0.001", null);
-        createOrder(buyerToken,  "BTC-KRW", "BUY",  "LIMIT", "GTC", "100000000", "0.001", null);
+        var sellResp = createOrder(sellerToken, "BTC-KRW", "SELL", "LIMIT", "GTC", "98000000", "0.001", null);
+        Long invSellId = ((Number) sellResp.getBody().get("orderId")).longValue();
+        var buyResp  = createOrder(buyerToken,  "BTC-KRW", "BUY",  "LIMIT", "GTC", "100000000", "0.001", null);
+        Long invBuyId  = ((Number) buyResp.getBody().get("orderId")).longValue();
+
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            assertThat(orderRepository.findById(invSellId).orElseThrow().getStatus().name()).isNotEqualTo("ACCEPTED");
+            assertThat(orderRepository.findById(invBuyId).orElseThrow().getStatus().name()).isNotEqualTo("ACCEPTED");
+        });
 
         var buyer  = userRepository.findByEmail("inv001-buyer@example.com").orElseThrow();
         var seller = userRepository.findByEmail("inv001-seller@example.com").orElseThrow();

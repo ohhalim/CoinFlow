@@ -27,10 +27,12 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 @SuppressWarnings({"rawtypes", "unchecked"})
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
@@ -99,10 +101,12 @@ class OrderBookRecoveryTest {
         Long canceledSellOrderId = orderId(canceledSellResponse);
         cancelOrder(sellerToken, canceledSellOrderId);
 
-        assertThat(orderRepository.findById(openBuyOrderId).orElseThrow().getStatus()).isEqualTo(OrderStatus.OPEN);
-        assertThat(orderRepository.findById(partialBuyOrderId).orElseThrow().getStatus()).isEqualTo(OrderStatus.PARTIALLY_FILLED);
-        assertThat(orderRepository.findById(filledSellOrderId).orElseThrow().getStatus()).isEqualTo(OrderStatus.FILLED);
-        assertThat(orderRepository.findById(canceledSellOrderId).orElseThrow().getStatus()).isEqualTo(OrderStatus.CANCELED);
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            assertThat(orderRepository.findById(openBuyOrderId).orElseThrow().getStatus()).isEqualTo(OrderStatus.OPEN);
+            assertThat(orderRepository.findById(partialBuyOrderId).orElseThrow().getStatus()).isEqualTo(OrderStatus.PARTIALLY_FILLED);
+            assertThat(orderRepository.findById(filledSellOrderId).orElseThrow().getStatus()).isEqualTo(OrderStatus.FILLED);
+            assertThat(orderRepository.findById(canceledSellOrderId).orElseThrow().getStatus()).isEqualTo(OrderStatus.CANCELED);
+        });
 
         matchingEngine.clearAll();
         assertThat(matchingEngine.getBuySide("BTC-KRW")).isEmpty();
@@ -134,6 +138,10 @@ class OrderBookRecoveryTest {
         );
         Long sellOrderId = orderId(sellResponse);
 
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(orderRepository.findById(sellOrderId).orElseThrow().getStatus())
+                        .isEqualTo(OrderStatus.OPEN));
+
         matchingEngine.clearAll();
         assertThat(matchingEngine.getSellSide("BTC-KRW")).isEmpty();
 
@@ -145,10 +153,13 @@ class OrderBookRecoveryTest {
         var buyResponse = createOrder(
                 buyerToken, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000", "0.0001", null
         );
+        Long rebuildBuyOrderId = ((Number) buyResponse.getBody().get("orderId")).longValue();
 
-        assertThat(buyResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
-        assertThat(buyResponse.getBody().get("status")).isEqualTo("FILLED");
-        assertThat(tradeRepository.count()).isEqualTo(1);
+        assertThat(buyResponse.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            assertThat(orderRepository.findById(rebuildBuyOrderId).orElseThrow().getStatus().name()).isEqualTo("FILLED");
+            assertThat(tradeRepository.count()).isEqualTo(1);
+        });
 
         var sellerOrder = orderRepository.findById(sellOrderId).orElseThrow();
         assertThat(sellerOrder.getStatus()).isEqualTo(OrderStatus.PARTIALLY_FILLED);
@@ -198,7 +209,7 @@ class OrderBookRecoveryTest {
     }
 
     private Long orderId(ResponseEntity<Map> response) {
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
         return ((Number) response.getBody().get("orderId")).longValue();
     }
 

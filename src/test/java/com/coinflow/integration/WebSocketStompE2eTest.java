@@ -42,7 +42,10 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
+import java.time.Duration;
+
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 @SuppressWarnings("rawtypes")
 @SpringBootTest(
@@ -136,6 +139,8 @@ class WebSocketStompE2eTest {
             createOrder(buyerToken, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000", "0.0001", null);
             createOrder(sellerToken, "BTC-KRW", "SELL", "LIMIT", "GTC", "100000000", "0.0001", null);
 
+            await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                    assertThat(tradeRepository.count()).isEqualTo(1));
             outboxPublisher.publishPendingEvents();
 
             TradeFeedMessage message = receivedMessages.poll(5, TimeUnit.SECONDS);
