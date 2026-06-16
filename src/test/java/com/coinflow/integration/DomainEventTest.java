@@ -21,11 +21,15 @@ import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.*;
 
+import com.coinflow.order.domain.OrderStatus;
+
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 @SuppressWarnings("rawtypes")
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
@@ -93,6 +97,11 @@ class DomainEventTest {
         var sellResponse = createOrder(sellerToken, "BTC-KRW", "SELL", "LIMIT", "GTC", "100000000", "0.0001", null);
         Long sellOrderId = ((Number) sellResponse.getBody().get("orderId")).longValue();
 
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            assertThat(orderRepository.findById(buyOrderId).orElseThrow().getStatus()).isEqualTo(OrderStatus.FILLED);
+            assertThat(orderRepository.findById(sellOrderId).orElseThrow().getStatus()).isEqualTo(OrderStatus.FILLED);
+        });
+
         // 매수 주문: ORDER_ACCEPTED + ORDER_FILLED
         var buyEvents = domainEventRepository.findAllByAggregateTypeAndAggregateId("ORDER", buyOrderId);
         var buyEventTypes = buyEvents.stream().map(e -> e.getEventType()).toList();
@@ -110,8 +119,7 @@ class DomainEventTest {
         );
 
         // TRADE: TRADE_CREATED + SETTLEMENT_COMPLETED
-        var trades = (List<?>) sellResponse.getBody().get("trades");
-        Long tradeId = ((Number) ((Map<?, ?>) trades.get(0)).get("tradeId")).longValue();
+        Long tradeId = tradeRepository.findAll().get(0).getId();
         var tradeEvents = domainEventRepository.findAllByAggregateTypeAndAggregateId("TRADE", tradeId);
         var tradeEventTypes = tradeEvents.stream().map(e -> e.getEventType()).toList();
         assertThat(tradeEventTypes).containsExactlyInAnyOrder(
@@ -132,6 +140,11 @@ class DomainEventTest {
         Long buyOrderId = ((Number) buyResponse.getBody().get("orderId")).longValue();
 
         createOrder(sellerToken, "BTC-KRW", "SELL", "LIMIT", "GTC", "100000000", "0.0001", null);
+
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(domainEventRepository.findAllByAggregateTypeAndAggregateId("ORDER", buyOrderId)
+                        .stream().map(e -> e.getEventType()).toList())
+                        .contains(DomainEventType.ORDER_PARTIALLY_FILLED));
 
         var buyEvents = domainEventRepository.findAllByAggregateTypeAndAggregateId("ORDER", buyOrderId);
         var buyEventTypes = buyEvents.stream().map(e -> e.getEventType()).toList();

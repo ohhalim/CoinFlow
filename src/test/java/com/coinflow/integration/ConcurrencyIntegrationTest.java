@@ -25,6 +25,7 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 
+import com.coinflow.order.domain.OrderStatus;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -39,6 +40,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 @SuppressWarnings({"rawtypes", "unchecked"})
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
@@ -106,7 +108,7 @@ class ConcurrencyIntegrationTest {
         );
 
         long successCount = responses.stream()
-                .filter(response -> response.getStatusCode() == HttpStatus.CREATED)
+                .filter(response -> response.getStatusCode() == HttpStatus.ACCEPTED)
                 .count();
         long insufficientBalanceCount = responses.stream()
                 .filter(response -> response.getStatusCode() == HttpStatus.BAD_REQUEST)
@@ -131,6 +133,11 @@ class ConcurrencyIntegrationTest {
                 .filter(ledger -> ledger.getType() == LedgerType.ORDER_LOCK)
                 .count();
         assertThat(orderLockLedgerCount).isEqualTo(successCount);
+
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(orderRepository.findAll().stream()
+                        .filter(o -> o.getStatus() == OrderStatus.ACCEPTED)
+                        .count()).isZero());
     }
 
     @RepeatedTest(10)
@@ -149,8 +156,13 @@ class ConcurrencyIntegrationTest {
                 "0.5",
                 "con002-maker"
         );
-        assertThat(makerResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(makerResponse.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
         Long makerOrderId = ((Number) makerResponse.getBody().get("orderId")).longValue();
+
+        // 매도 주문이 오더북에 적재될 때까지 대기
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(orderRepository.findById(makerOrderId).orElseThrow().getStatus().name()).isEqualTo("OPEN")
+        );
 
         List<String> buyerTokens = new ArrayList<>();
         for (int i = 0; i < TAKER_REQUESTS; i++) {
@@ -174,13 +186,24 @@ class ConcurrencyIntegrationTest {
 
         assertThat(responses)
                 .extracting(ResponseEntity::getStatusCode)
-                .containsOnly(HttpStatus.CREATED);
+                .containsOnly(HttpStatus.ACCEPTED);
 
-        long filledTakerCount = responses.stream()
-                .filter(response -> "FILLED".equals(response.getBody().get("status")))
+        // 모든 taker 주문이 최종 상태로 전이될 때까지 대기
+        List<Long> takerOrderIds = responses.stream()
+                .map(r -> ((Number) r.getBody().get("orderId")).longValue())
+                .toList();
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+            long pendingCount = takerOrderIds.stream()
+                    .filter(id -> orderRepository.findById(id).orElseThrow().getStatus() == OrderStatus.ACCEPTED)
+                    .count();
+            assertThat(pendingCount).isZero();
+        });
+
+        long filledTakerCount = takerOrderIds.stream()
+                .filter(id -> orderRepository.findById(id).orElseThrow().getStatus() == OrderStatus.FILLED)
                 .count();
-        long openTakerCount = responses.stream()
-                .filter(response -> "OPEN".equals(response.getBody().get("status")))
+        long openTakerCount = takerOrderIds.stream()
+                .filter(id -> orderRepository.findById(id).orElseThrow().getStatus() == OrderStatus.OPEN)
                 .count();
 
         assertThat(filledTakerCount).isEqualTo(5);
@@ -283,7 +306,7 @@ class ConcurrencyIntegrationTest {
             assertThat(writeResponses)
                     .hasSize(ORDERBOOK_WRITERS * ORDERBOOK_WRITES_PER_WRITER)
                     .extracting(ResponseEntity::getStatusCode)
-                    .containsOnly(HttpStatus.CREATED);
+                    .containsOnly(HttpStatus.ACCEPTED);
             assertThat(readResponses)
                     .hasSize(ORDERBOOK_READERS * ORDERBOOK_READS_PER_READER)
                     .extracting(ResponseEntity::getStatusCode)
@@ -297,7 +320,9 @@ class ConcurrencyIntegrationTest {
             }
 
             assertThat(orderRepository.count()).isEqualTo(ORDERBOOK_WRITERS * ORDERBOOK_WRITES_PER_WRITER);
-            assertThat(matchingEngine.getBuySide("BTC-KRW")).hasSize(ORDERBOOK_WRITERS * ORDERBOOK_WRITES_PER_WRITER);
+            await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
+                    assertThat(matchingEngine.getBuySide("BTC-KRW")).hasSize(ORDERBOOK_WRITERS * ORDERBOOK_WRITES_PER_WRITER)
+            );
         } finally {
             executor.shutdownNow();
             assertThat(executor.awaitTermination(Duration.ofSeconds(5).toMillis(), TimeUnit.MILLISECONDS)).isTrue();
@@ -324,8 +349,13 @@ class ConcurrencyIntegrationTest {
                 "0.5",
                 "con004-maker"
         );
-        assertThat(makerResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(makerResponse.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
         Long makerOrderId = ((Number) makerResponse.getBody().get("orderId")).longValue();
+
+        // 매수 주문이 오더북에 적재될 때까지 대기
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(orderRepository.findById(makerOrderId).orElseThrow().getStatus().name()).isEqualTo("OPEN")
+        );
 
         ExecutorService executor = Executors.newFixedThreadPool(2);
         CountDownLatch ready = new CountDownLatch(2);
@@ -376,11 +406,18 @@ class ConcurrencyIntegrationTest {
             assertWalletNeverNegative(sellerKrw);
             assertWalletNeverNegative(sellerBtc);
 
+            // taker 주문 최종 상태 대기
+            Long takerOrderId = ((Number) takerResponse.getBody().get("orderId")).longValue();
+            await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                    assertThat(orderRepository.findById(takerOrderId).orElseThrow().getStatus().name())
+                            .isIn("OPEN", "FILLED")
+            );
+
             if ("CANCELED".equals(makerOrder.getStatus().name())) {
                 assertThat(cancelResponse.getStatusCode()).isEqualTo(HttpStatus.OK);
                 assertThat(cancelResponse.getBody().get("status")).isEqualTo("CANCELED");
-                assertThat(takerResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
-                assertThat(takerResponse.getBody().get("status")).isEqualTo("OPEN");
+                assertThat(takerResponse.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+                assertThat(orderRepository.findById(takerOrderId).orElseThrow().getStatus().name()).isEqualTo("OPEN");
                 assertThat(tradeRepository.count()).isZero();
 
                 assertThat(buyerKrw.getAvailableBalance()).isEqualByComparingTo("50000");
@@ -392,8 +429,8 @@ class ConcurrencyIntegrationTest {
             } else {
                 assertThat(cancelResponse.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
                 assertThat(cancelResponse.getBody().get("code")).isEqualTo("ORDER_NOT_CANCELABLE");
-                assertThat(takerResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
-                assertThat(takerResponse.getBody().get("status")).isEqualTo("FILLED");
+                assertThat(takerResponse.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+                assertThat(orderRepository.findById(takerOrderId).orElseThrow().getStatus().name()).isEqualTo("FILLED");
                 assertThat(tradeRepository.count()).isEqualTo(1);
 
                 BigDecimal totalTradedQuantity = tradeRepository.findAll().stream()
@@ -435,7 +472,7 @@ class ConcurrencyIntegrationTest {
         );
 
         long successCount = responses.stream()
-                .filter(response -> response.getStatusCode() == HttpStatus.CREATED)
+                .filter(response -> response.getStatusCode() == HttpStatus.ACCEPTED)
                 .count();
         long duplicateCount = responses.stream()
                 .filter(response -> response.getStatusCode() == HttpStatus.CONFLICT)
@@ -456,7 +493,9 @@ class ConcurrencyIntegrationTest {
                 .filter(ledger -> ledger.getType() == LedgerType.ORDER_LOCK)
                 .count();
         assertThat(orderLockLedgerCount).isEqualTo(1);
-        assertThat(matchingEngine.getBuySide("BTC-KRW")).hasSize(1);
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(matchingEngine.getBuySide("BTC-KRW")).hasSize(1)
+        );
     }
 
     @RepeatedTest(10)
@@ -475,7 +514,7 @@ class ConcurrencyIntegrationTest {
                 "0.0001",
                 "con006-maker"
         );
-        assertThat(createResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(createResponse.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
         Long orderId = ((Number) createResponse.getBody().get("orderId")).longValue();
 
         List<ResponseEntity<Map>> responses = runConcurrently(10, index -> cancelOrder(token, orderId));

@@ -24,7 +24,10 @@ import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 
+import java.time.Duration;
+
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 @SuppressWarnings({"rawtypes", "unchecked"})
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
@@ -107,6 +110,10 @@ class QueryApiTest {
 
         createOrder(buyerToken, "BTC-KRW", "BUY", "100000000", "0.0001");
         createOrder(sellerToken, "BTC-KRW", "SELL", "110000000", "0.0001");
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            assertThat(matchingEngine.getBuySide("BTC-KRW")).hasSize(1);
+            assertThat(matchingEngine.getSellSide("BTC-KRW")).hasSize(1);
+        });
 
         var response = restTemplate.getForEntity("/api/v1/markets/BTC-KRW/orderbook", Map.class);
 
@@ -127,6 +134,9 @@ class QueryApiTest {
         createOrder(token, "BTC-KRW", "BUY", "90000000", "0.0001");
         createOrder(token, "BTC-KRW", "BUY", "100000000", "0.0001");
         createOrder(token, "BTC-KRW", "BUY", "80000000", "0.0001");
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(matchingEngine.getBuySide("BTC-KRW")).hasSize(3)
+        );
 
         var response = restTemplate.getForEntity("/api/v1/markets/BTC-KRW/orderbook", Map.class);
         List<Map<?, ?>> bids = (List<Map<?, ?>>) response.getBody().get("bids");
@@ -145,6 +155,9 @@ class QueryApiTest {
         createOrder(token, "BTC-KRW", "BUY", "100000000", "0.0001");
         createOrder(token, "BTC-KRW", "BUY", "100000000", "0.0001");
         createOrder(token, "BTC-KRW", "BUY", "90000000", "0.0001");
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(matchingEngine.getBuySide("BTC-KRW")).hasSize(3)
+        );
 
         var response = restTemplate.getForEntity("/api/v1/markets/BTC-KRW/orderbook?depth=1", Map.class);
         List<Map<?, ?>> bids = (List<Map<?, ?>>) response.getBody().get("bids");
@@ -165,6 +178,9 @@ class QueryApiTest {
 
         createOrder(buyerToken, "BTC-KRW", "BUY", "100000000", "0.0001");
         createOrder(sellerToken, "BTC-KRW", "SELL", "100000000", "0.0001");
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(tradeRepository.count()).isGreaterThan(0)
+        );
 
         var response = restTemplate.getForEntity("/api/v1/markets/BTC-KRW/trades", List.class);
 
@@ -189,6 +205,9 @@ class QueryApiTest {
             createOrder(sellerToken, "BTC-KRW", "SELL", "100000000", "0.0001");
         }
 
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
+                assertThat(tradeRepository.count()).isEqualTo(5));
+
         var response = restTemplate.getForEntity("/api/v1/markets/BTC-KRW/trades?limit=3", List.class);
         assertThat(((List<?>) response.getBody())).hasSizeLessThanOrEqualTo(3);
     }
@@ -204,6 +223,9 @@ class QueryApiTest {
 
         createOrder(buyerToken, "BTC-KRW", "BUY", "100000000", "0.0001");
         createOrder(sellerToken, "BTC-KRW", "SELL", "100000000", "0.0001");
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(tradeRepository.count()).isGreaterThan(0)
+        );
 
         var buyerFills = getFills(buyerToken, null);
         assertThat(buyerFills.getStatusCode()).isEqualTo(HttpStatus.OK);
@@ -227,6 +249,9 @@ class QueryApiTest {
 
         createOrder(buyerToken, "BTC-KRW", "BUY", "100000000", "0.0001");
         createOrder(sellerToken, "BTC-KRW", "SELL", "100000000", "0.0001");
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(tradeRepository.count()).isGreaterThan(0)
+        );
 
         var response = getFills(buyerToken, "BTC-KRW");
         List<Map<?, ?>> fills = (List<Map<?, ?>>) response.getBody();
@@ -247,6 +272,9 @@ class QueryApiTest {
 
         createOrder(buyerToken, "BTC-KRW", "BUY", "100000000", "0.0001");
         createOrder(sellerToken, "BTC-KRW", "SELL", "100000000", "0.0001");
+
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
+                assertThat(tradeRepository.count()).isEqualTo(2));
 
         var response = getFills(buyerToken, "BTC-KRW", buyOrderId);
         List<Map<?, ?>> fills = (List<Map<?, ?>>) response.getBody();

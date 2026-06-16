@@ -30,6 +30,7 @@ import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -97,6 +98,8 @@ class WebSocketOrderBookBroadcastIntegrationTest {
         depositBtc("orderbook-create-seller@example.com", new BigDecimal("0.001"));
 
         createOrder(sellerToken, "BTC-KRW", "SELL", "LIMIT", "GTC", "100000000", "0.0001", null);
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(matchingEngine.getSellSide("BTC-KRW")).hasSize(1));
         outboxPublisher.publishPendingEvents();
 
         OrderBookSnapshotMessage message = awaitOrderBookMessage();
@@ -116,11 +119,15 @@ class WebSocketOrderBookBroadcastIntegrationTest {
         depositBtc("orderbook-fill-seller@example.com", new BigDecimal("0.001"));
 
         createOrder(sellerToken, "BTC-KRW", "SELL", "LIMIT", "GTC", "100000000", "0.0001", null);
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(matchingEngine.getSellSide("BTC-KRW")).hasSize(1));
         outboxPublisher.publishPendingEvents();
         awaitOrderBookMessage();
         reset(messagingTemplate);
 
         createOrder(buyerToken, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000", "0.0001", null);
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(tradeRepository.count()).isEqualTo(1));
         outboxPublisher.publishPendingEvents();
 
         OrderBookSnapshotMessage message = awaitOrderBookMessage();
@@ -136,6 +143,8 @@ class WebSocketOrderBookBroadcastIntegrationTest {
 
         Long orderId = createOrder(sellerToken, "BTC-KRW", "SELL", "LIMIT", "GTC",
                 "100000000", "0.0001", null);
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(matchingEngine.getSellSide("BTC-KRW")).hasSize(1));
         outboxPublisher.publishPendingEvents();
         awaitOrderBookMessage();
         reset(messagingTemplate);

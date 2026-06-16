@@ -73,11 +73,16 @@ class OrderApiTest {
         depositKrw("order001@example.com", new BigDecimal("10000000"));
 
         var response = createOrder(token, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000", "0.0001", null);
+        Long orderId = ((Number) response.getBody().get("orderId")).longValue();
 
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
-        assertThat(response.getBody()).containsKeys("orderId", "market", "side", "price", "status");
-        assertThat(response.getBody().get("status")).isEqualTo("OPEN");
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+        assertThat(response.getBody()).containsKeys("orderId", "market", "side", "status");
+        assertThat(response.getBody().get("status")).isEqualTo("ACCEPTED");
         assertThat(response.getBody().get("side")).isEqualTo("BUY");
+
+        await().atMost(Duration.ofSeconds(3)).untilAsserted(() ->
+                assertThat(orderRepository.findById(orderId).orElseThrow().getStatus().name()).isEqualTo("OPEN")
+        );
 
         var user = userRepository.findByEmail("order001@example.com").orElseThrow();
         var krwWallet = findWallet(user.getId(), "KRW");
@@ -91,10 +96,15 @@ class OrderApiTest {
         depositBtc("order002@example.com", new BigDecimal("0.001"));
 
         var response = createOrder(token, "BTC-KRW", "SELL", "LIMIT", "GTC", "100000000", "0.0001", null);
+        Long orderId = ((Number) response.getBody().get("orderId")).longValue();
 
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
-        assertThat(response.getBody().get("status")).isEqualTo("OPEN");
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+        assertThat(response.getBody().get("status")).isEqualTo("ACCEPTED");
         assertThat(response.getBody().get("side")).isEqualTo("SELL");
+
+        await().atMost(Duration.ofSeconds(3)).untilAsserted(() ->
+                assertThat(orderRepository.findById(orderId).orElseThrow().getStatus().name()).isEqualTo("OPEN")
+        );
 
         var user = userRepository.findByEmail("order002@example.com").orElseThrow();
         var btcWallet = findWallet(user.getId(), "BTC");
@@ -253,7 +263,11 @@ class OrderApiTest {
         depositKrw("order006b@example.com", new BigDecimal("100000000"));
 
         var firstResponse = createOrder(token, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000", "0.0001", "my-order-2");
-        assertThat(firstResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(firstResponse.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+
+        await().atMost(Duration.ofSeconds(3)).untilAsserted(() ->
+                assertThat(matchingEngine.getBuySide("BTC-KRW")).hasSize(1)
+        );
 
         long orderCountBefore = orderRepository.count();
         long ledgerCountBefore = walletLedgerRepository.count();
@@ -391,20 +405,22 @@ class OrderApiTest {
         depositBtc("order014@example.com", new BigDecimal("0.001"));
 
         // BUY 주문 먼저 등록 (오더북에 적재)
-        createOrder(buyerToken, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000", "0.0001", null);
+        var buyResponse = createOrder(buyerToken, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000", "0.0001", null);
+        Long buyOrderId = ((Number) buyResponse.getBody().get("orderId")).longValue();
 
         // SELL 주문 → BUY와 체결
         var sellResponse = createOrder(sellerToken, "BTC-KRW", "SELL", "LIMIT", "GTC", "100000000", "0.0001", null);
+        Long sellOrderId = ((Number) sellResponse.getBody().get("orderId")).longValue();
 
-        assertThat(sellResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
-        assertThat(sellResponse.getBody().get("status")).isEqualTo("FILLED");
+        assertThat(sellResponse.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+        assertThat(sellResponse.getBody().get("side")).isEqualTo("SELL");
 
-        var trades = (java.util.List<?>) sellResponse.getBody().get("trades");
-        assertThat(trades).hasSize(1);
-        var trade = (Map<?, ?>) trades.get(0);
-        assertThat(trade.get("price")).isEqualTo("100000000");
-        assertThat(trade.get("quantity")).isEqualTo("0.0001");
-        assertThat(trade.get("liquidity")).isEqualTo("TAKER");
+        // 체결 완료 대기
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            assertThat(orderRepository.findById(buyOrderId).orElseThrow().getStatus().name()).isEqualTo("FILLED");
+            assertThat(orderRepository.findById(sellOrderId).orElseThrow().getStatus().name()).isEqualTo("FILLED");
+            assertThat(tradeRepository.count()).isEqualTo(1);
+        });
 
         // buyer: KRW locked 소진, BTC 지급 확인
         var buyer = userRepository.findByEmail("order013@example.com").orElseThrow();
@@ -433,9 +449,14 @@ class OrderApiTest {
 
         // SELL 0.0001 BTC → 부분 체결
         var sellResponse = createOrder(sellerToken, "BTC-KRW", "SELL", "LIMIT", "GTC", "100000000", "0.0001", null);
+        Long sellOrderId = ((Number) sellResponse.getBody().get("orderId")).longValue();
 
-        assertThat(sellResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
-        assertThat(sellResponse.getBody().get("status")).isEqualTo("FILLED");
+        assertThat(sellResponse.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+
+        // 체결 완료 대기
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(orderRepository.findById(sellOrderId).orElseThrow().getStatus().name()).isEqualTo("FILLED")
+        );
 
         // buyer BTC 잔고 확인
         var buyer = userRepository.findByEmail("order015@example.com").orElseThrow();
@@ -451,10 +472,13 @@ class OrderApiTest {
 
         createOrder(token, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000", "0.0001", null);
         var sellResponse = createOrder(token, "BTC-KRW", "SELL", "LIMIT", "GTC", "100000000", "0.0001", null);
+        Long sellOrderId = ((Number) sellResponse.getBody().get("orderId")).longValue();
 
-        // self-trade 방지 → taker 전체 거절
-        assertThat(sellResponse.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
-        assertThat(sellResponse.getBody().get("code")).isEqualTo("SELF_TRADE_NOT_ALLOWED");
+        // self-trade 방지 → 비동기 워커에서 taker 거절
+        assertThat(sellResponse.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(orderRepository.findById(sellOrderId).orElseThrow().getStatus().name()).isEqualTo("REJECTED")
+        );
     }
 
     @Test
@@ -465,21 +489,20 @@ class OrderApiTest {
 
         createOrder(token, "BTC-KRW", "BUY", "LIMIT", "GTC", "100000000", "0.0001", null);
 
-        long orderCountBefore = orderRepository.count();
-        long ledgerCountBefore = walletLedgerRepository.count();
-        long eventCountBefore = domainEventRepository.count();
         var user = userRepository.findByEmail("order017b@example.com").orElseThrow();
         var krwWalletBefore = findWallet(user.getId(), "KRW");
         var btcWalletBefore = findWallet(user.getId(), "BTC");
 
         var sellResponse = createOrder(token, "BTC-KRW", "SELL", "LIMIT", "GTC", "100000000", "0.0001", null);
+        Long sellOrderId = ((Number) sellResponse.getBody().get("orderId")).longValue();
 
-        assertThat(sellResponse.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
-        assertThat(sellResponse.getBody().get("code")).isEqualTo("SELF_TRADE_NOT_ALLOWED");
-        assertThat(orderRepository.count()).isEqualTo(orderCountBefore);
+        // 비동기 워커에서 자기체결 감지 → taker REJECTED, wallet lock 해제
+        assertThat(sellResponse.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(orderRepository.findById(sellOrderId).orElseThrow().getStatus().name()).isEqualTo("REJECTED")
+        );
+
         assertThat(tradeRepository.count()).isZero();
-        assertThat(walletLedgerRepository.count()).isEqualTo(ledgerCountBefore);
-        assertThat(domainEventRepository.count()).isEqualTo(eventCountBefore);
 
         var krwWalletAfter = findWallet(user.getId(), "KRW");
         var btcWalletAfter = findWallet(user.getId(), "BTC");
@@ -539,7 +562,7 @@ class OrderApiTest {
     private ResponseEntity<Map> createAsyncOrder(String token, String market, String side, String type,
                                                  String timeInForce, String price, String quantity,
                                                  String clientOrderId) {
-        return createOrder(token, "/api/v1/orders/async", market, side, type, timeInForce, price, quantity, clientOrderId);
+        return createOrder(token, "/api/v1/orders", market, side, type, timeInForce, price, quantity, clientOrderId);
     }
 
     private ResponseEntity<Map> createOrder(String token, String url, String market, String side, String type,

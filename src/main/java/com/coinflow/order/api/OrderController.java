@@ -1,9 +1,8 @@
 package com.coinflow.order.api;
 
-import com.coinflow.order.dto.CancelOrderResponse;
 import com.coinflow.order.dto.AcceptedOrderResponse;
+import com.coinflow.order.dto.CancelOrderResponse;
 import com.coinflow.order.dto.CreateOrderRequest;
-import com.coinflow.order.dto.CreateOrderResponse;
 import com.coinflow.order.dto.OrderDetailResponse;
 import com.coinflow.order.dto.OrderSummaryResponse;
 import com.coinflow.order.service.OrderService;
@@ -22,7 +21,6 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
-import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
@@ -36,23 +34,13 @@ public class OrderController {
     private final OrderService orderService;
 
     @PostMapping
-    @ResponseStatus(HttpStatus.CREATED)
-    public CreateOrderResponse createOrder(
-            @AuthenticationPrincipal Jwt jwt,
-            @Valid @RequestBody CreateOrderRequest request
-    ) {
-        Long userId = Long.parseLong(jwt.getSubject());
-        return orderService.createOrder(userId, request);
-    }
-
-    @PostMapping("/async")
-    public ResponseEntity<AcceptedOrderResponse> acceptOrder(
+    public ResponseEntity<AcceptedOrderResponse> createOrder(
             @AuthenticationPrincipal Jwt jwt,
             @Valid @RequestBody CreateOrderRequest request
     ) {
         Long userId = Long.parseLong(jwt.getSubject());
         return ResponseEntity.status(HttpStatus.ACCEPTED)
-                .body(orderService.acceptOrder(userId, request));
+                .body(orderService.createOrder(userId, request));
     }
 
     @PostMapping("/{id}/cancel")
