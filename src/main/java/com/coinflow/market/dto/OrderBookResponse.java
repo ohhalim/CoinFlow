@@ -40,8 +40,8 @@ public record OrderBookResponse(
         return quantitiesByPrice.entrySet().stream()
                 .limit(depth)
                 .map(entry -> new PriceLevel(
-                        entry.getKey().toPlainString(),
-                        entry.getValue().toPlainString()
+                        entry.getKey().stripTrailingZeros().toPlainString(),
+                        entry.getValue().stripTrailingZeros().toPlainString()
                 ))
                 .toList();
     }
