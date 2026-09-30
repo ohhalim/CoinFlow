@@ -6,7 +6,9 @@ import com.coinflow.event.service.OutboxPublisher;
 import com.coinflow.market.repository.MarketRepository;
 import com.coinflow.order.matching.MatchingEngine;
 import com.coinflow.order.repository.OrderRepository;
+import com.coinflow.order.service.command.MarketOrderCommandQueue;
 import com.coinflow.support.IntegrityAssertions;
+import com.coinflow.support.MarketWorkerBarrier;
 import com.coinflow.support.TestcontainersConfig;
 import com.coinflow.trade.repository.TradeRepository;
 import com.coinflow.wallet.domain.Wallet;
@@ -57,12 +59,14 @@ class WebSocketTradeFeedIntegrationTest {
     @Autowired private DomainEventRepository domainEventRepository;
     @Autowired private MarketRepository marketRepository;
     @Autowired private MatchingEngine matchingEngine;
+    @Autowired private MarketOrderCommandQueue marketOrderCommandQueue;
     @Autowired private OutboxPublisher outboxPublisher;
 
     @MockitoBean private SimpMessagingTemplate messagingTemplate;
 
     @BeforeEach
     void setUp() {
+        MarketWorkerBarrier.awaitIdle(marketRepository, marketOrderCommandQueue);
         domainEventRepository.deleteAllInBatch();
         walletLedgerRepository.deleteAllInBatch();
         tradeRepository.deleteAllInBatch();

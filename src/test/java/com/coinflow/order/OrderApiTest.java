@@ -5,7 +5,9 @@ import com.coinflow.event.repository.DomainEventRepository;
 import com.coinflow.market.repository.MarketRepository;
 import com.coinflow.order.matching.MatchingEngine;
 import com.coinflow.order.repository.OrderRepository;
+import com.coinflow.order.service.command.MarketOrderCommandQueue;
 import com.coinflow.support.IntegrityAssertions;
+import com.coinflow.support.MarketWorkerBarrier;
 import com.coinflow.support.TestcontainersConfig;
 import com.coinflow.trade.repository.TradeRepository;
 import com.coinflow.wallet.domain.Wallet;
@@ -41,9 +43,11 @@ class OrderApiTest {
     @Autowired private DomainEventRepository domainEventRepository;
     @Autowired private MarketRepository marketRepository;
     @Autowired private MatchingEngine matchingEngine;
+    @Autowired private MarketOrderCommandQueue marketOrderCommandQueue;
 
     @BeforeEach
     void setUp() {
+        MarketWorkerBarrier.awaitIdle(marketRepository, marketOrderCommandQueue);
         matchingEngine.clearAll();
         walletLedgerRepository.deleteAll();
         domainEventRepository.deleteAll();

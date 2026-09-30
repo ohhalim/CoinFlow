@@ -7,7 +7,9 @@ import com.coinflow.order.domain.OrderStatus;
 import com.coinflow.order.matching.MatchingEngine;
 import com.coinflow.order.matching.OrderBookRecoveryService;
 import com.coinflow.order.repository.OrderRepository;
+import com.coinflow.order.service.command.MarketOrderCommandQueue;
 import com.coinflow.support.IntegrityAssertions;
+import com.coinflow.support.MarketWorkerBarrier;
 import com.coinflow.support.TestcontainersConfig;
 import com.coinflow.trade.repository.TradeRepository;
 import com.coinflow.wallet.domain.Wallet;
@@ -48,10 +50,12 @@ class OrderBookRecoveryTest {
     @Autowired private DomainEventRepository domainEventRepository;
     @Autowired private MarketRepository marketRepository;
     @Autowired private MatchingEngine matchingEngine;
+    @Autowired private MarketOrderCommandQueue marketOrderCommandQueue;
     @Autowired private OrderBookRecoveryService orderBookRecoveryService;
 
     @BeforeEach
     void setUp() {
+        MarketWorkerBarrier.awaitIdle(marketRepository, marketOrderCommandQueue);
         matchingEngine.clearAll();
         domainEventRepository.deleteAllInBatch();
         walletLedgerRepository.deleteAllInBatch();
