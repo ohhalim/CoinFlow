@@ -74,16 +74,15 @@ jobs:
             }
 
             // 4) 브랜치 라우팅 규칙
-            //   - hotfix: from main -> PR to main
-            //   - release: from develop -> PR to main
+            //   - release: 별도 브랜치 없이 develop -> main PR 생성
             //   - 그 외: from develop -> PR to develop
             let from_branch = 'develop';
             let pr_base = 'develop';
+            let skip_branch = false;
 
-            if (type === 'hotfix') {
-              from_branch = 'main'; pr_base = 'main';
-            } else if (type === 'release') {
-              from_branch = 'develop'; pr_base = 'main';
+            if (type === 'release') {
+              pr_base = 'main';
+              skip_branch = true;
             }
 
             // 5) 브랜치 이름 (이슈 번호 포함)
@@ -94,9 +93,11 @@ jobs:
             core.setOutput('from_branch', from_branch);
             core.setOutput('pr_base', pr_base);
             core.setOutput('branch', branch);
+            core.setOutput('skip_branch', String(skip_branch));
 
       - name: Create branch from decided base
         id: create_branch
+        if: steps.decide.outputs.skip_branch != 'true'
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -115,17 +116,54 @@ jobs:
               sha: ref.object.sha
             });
 
+      - name: Create develop to main release PR
+        id: create_release_pr
+        if: steps.decide.outputs.skip_branch == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const issue = context.payload.issue;
+            const { data: openPulls } = await github.rest.pulls.list({
+              ...context.repo,
+              state: 'open',
+              head: `${context.repo.owner}:develop`,
+              base: 'main'
+            });
+
+            if (openPulls.length > 0) {
+              core.setOutput('pr_url', openPulls[0].html_url);
+              return;
+            }
+
+            const releaseTitle = issue.title.replace(/^\[Release\]\s*:\s*/i, 'release: ');
+            const { data: pull } = await github.rest.pulls.create({
+              ...context.repo,
+              title: releaseTitle,
+              head: 'develop',
+              base: 'main',
+              body: `${issue.body || ''}\n\nCloses #${issue.number}`
+            });
+            core.setOutput('pr_url', pull.html_url);
+
       - name: Comment on issue with results
         if: always()
         uses: actions/github-script@v7
         with:
           script: |
             const issue_number = context.payload.issue.number;
+            const isRelease = '${{ steps.decide.outputs.skip_branch }}' === 'true';
             const branch = '${{ steps.decide.outputs.branch }}';
-            const success = '${{ steps.create_branch.outcome }}' === 'success';
-            const body = success
-              ? `브랜치 \`${branch}\` 가 생성되었습니다.`
-              : `브랜치 생성에 실패했습니다. Actions 로그를 확인해주세요.`;
+            const branchSuccess = '${{ steps.create_branch.outcome }}' === 'success';
+            const releaseSuccess = '${{ steps.create_release_pr.outcome }}' === 'success';
+            const releasePrUrl = '${{ steps.create_release_pr.outputs.pr_url }}';
+            const body = isRelease
+              ? releaseSuccess
+                ? `별도 release 브랜치 없이 \`develop → main\` PR을 생성했습니다: ${releasePrUrl}`
+                : `\`develop → main\` PR 생성에 실패했습니다. Actions 로그를 확인해주세요.`
+              : branchSuccess
+                ? `브랜치 \`${branch}\` 가 생성되었습니다.`
+                : `브랜치 생성에 실패했습니다. Actions 로그를 확인해주세요.`;
             await github.rest.issues.createComment({
               ...context.repo,
               issue_number,
