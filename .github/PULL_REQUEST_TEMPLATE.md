@@ -19,3 +19,8 @@
 ## 관련 이슈
 <!-- 관련 이슈를 연결하세요. 이슈가 자동으로 닫히게 하려면 closes/fixes/resolves 키워드를 사용하세요 -->
 closes #이슈번호
+
+## 브랜치 흐름
+- [ ] 작업 브랜치 → `develop`, `develop` → `main`, 또는 `main` → `develop` 동기화 PR입니다.
+- [ ] `main` 대상 PR의 head가 `develop`인지 확인했습니다.
+- [ ] 릴리즈 후 `main → develop` 동기화 PR을 생성합니다.
