@@ -1,68 +1,106 @@
-name: CD Pipeline
+name: CD Pipeline — Backend
 
 on:
-  workflow_dispatch:     # 수동 실행만 허용 (EC2 준비 후 push 트리거로 변경)
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/coinflow-backend
 
 jobs:
-  deploy:
+  build-and-push:
     runs-on: ubuntu-latest
+    # 수동 실행도 main 에서만 이미지를 만든다. 작업 브랜치가 latest 를 덮어쓰지 않게 한다.
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up JDK 21
-        uses: actions/setup-java@v4
-        with:
-          java-version: '21'
-          distribution: 'corretto'
-          cache: 'gradle'
-
-      - name: 빌드 권한 부여
-        run: chmod +x ./gradlew
-
-      - name: JAR 빌드 (테스트 제외)
-        run: ./gradlew clean build -x test --no-daemon
-
-      - name: Docker Hub 로그인
+      - name: Log in to ghcr.io
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Docker 이미지 빌드 및 푸시
+      - name: Build and push image
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
           # 이미지 태그: latest + git SHA (롤백 시 특정 버전 지정 가능)
           tags: |
-            ${{ secrets.DOCKER_USERNAME }}/coinflow:latest
-            ${{ secrets.DOCKER_USERNAME }}/coinflow:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
 
-      - name: EC2 배포 (SSH)
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    # EC2 와 secret(EC2_HOST, EC2_USER, EC2_SSH_KEY)이 준비되면
+    # 저장소 변수 EC2_DEPLOY_ENABLED=true 를 설정한다. 그 전에는 이 job 을 건너뛴다.
+    if: github.ref == 'refs/heads/main' && vars.EC2_DEPLOY_ENABLED == 'true'
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Copy docker-compose.prod.yml to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: docker-compose.prod.yml
+          target: /opt/coinflow/
+
+      - name: Copy backend health gate to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: .github/scripts/wait-for-backend-health.sh
+          target: /opt/coinflow/
+          strip_components: 2
+
+      - name: Deploy to EC2
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            # 최신 이미지 Pull
-            docker pull ${{ secrets.DOCKER_USERNAME }}/coinflow:latest
+            set -euo pipefail
+            cd /opt/coinflow
+            export COMPOSE_FILE=docker-compose.prod.yml
 
-            # 기존 컨테이너 중지 및 제거
-            docker stop coinflow || true
-            docker rm coinflow || true
+            for required_key in \
+              DB_PASSWORD \
+              MYSQL_ROOT_PASSWORD \
+              JWT_SECRET; do
+              if ! grep -Eq "^${required_key}=.+$" .env; then
+                echo "ERROR: ${required_key} is not configured in /opt/coinflow/.env"
+                exit 1
+              fi
+            done
 
-            # 새 컨테이너 실행
-            docker run -d \
-              --name coinflow \
-              --restart always \
-              -p 8080:8080 \
-              -e DB_URL=${{ secrets.DB_URL }} \
-              -e DB_USERNAME=${{ secrets.DB_USERNAME }} \
-              -e DB_PASSWORD=${{ secrets.DB_PASSWORD }} \
-              ${{ secrets.DOCKER_USERNAME }}/coinflow:latest
+            if grep -Eq '^JWT_SECRET=(change-this-secret|replace-with-random-secret)' .env; then
+              echo "ERROR: JWT_SECRET must not be a published example value"
+              exit 1
+            fi
 
-            # 사용하지 않는 이미지 정리
+            echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            docker compose config -q
+            docker compose pull backend
+            docker compose up -d --wait mysql kafka
+            bash wait-for-backend-health.sh
             docker image prune -f
