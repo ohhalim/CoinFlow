@@ -27,6 +27,15 @@ if [[ "${base_branch}" == "develop" ]]; then
     exit 0
   fi
 
+  # Dependabot 은 브랜치 이름을 자기 형식으로 짓고 이슈도 만들지 않는다.
+  # 사람 규칙을 그대로 들이대면 의존성 업데이트 PR 이 전부 첫 스텝에서 막혀
+  # 테스트가 돌아보지도 못한다. 그 상태가 이어지면 실패한 체크가 일상이 되고
+  # 정작 진짜 실패를 흘려보낸다.
+  if [[ "${head_branch}" =~ ^dependabot/[A-Za-z0-9._/-]+$ && "${head_branch}" != *".."* ]]; then
+    echo "OK: dependabot update -> develop flow"
+    exit 0
+  fi
+
   echo "ERROR: develop 대상 PR의 브랜치 이름이 허용 규칙과 다릅니다."
   echo "Allowed: <type>/<issue-number>/<keyword> or main -> develop sync"
   exit 1
